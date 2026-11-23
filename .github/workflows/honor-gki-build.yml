@@ -1,0 +1,121 @@
+name: Honor GKI Build (android15-6.6)
+
+# 手动触发；同一时刻只允许一个构建
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Honor model code (matches source zip file name)'
+        required: true
+        default: 'AAK-AN00'
+      bazel_config:
+        description: 'Kleaf bazel config'
+        required: true
+        default: 'fast'
+        type: choice
+        options: ['fast', 'local', 'release']
+
+concurrency:
+  group: honor-gki-build
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  MODEL: ${{ github.event.inputs.model }}
+  BRANCH: common-android15-6.6
+  WS: ${{ github.workspace }}/kernel_ws
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repo (for scripts)
+        uses: actions/checkout@v4
+
+      # GitHub 托管 runner 磁盘较紧，先清掉不需要的大目录
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL || true
+          df -h
+          nproc; free -h
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl ca-certificates unzip zip bison flex bc \
+            build-essential libssl-dev libelf-dev rsync cpio lz4 \
+            python3 device-tree-compiler
+          echo "== install repo =="
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > /tmp/repo
+          sudo install -m 0755 /tmp/repo /usr/local/bin/repo
+          repo --version || true
+          git config --global user.name  "honor-gki-bot"
+          git config --global user.email "honor-gki-bot@users.noreply.github.com"
+
+      # 1) 拉荣耀源码（脚本内部实时查接口拿"当前有效"签名 URL + 带 Referer 下载 + 解压）
+      - name: Fetch Honor open source (${{ env.MODEL }})
+        run: |
+          chmod +x scripts/fetch_honor_source.sh
+          ./scripts/fetch_honor_source.sh "${MODEL}" "${GITHUB_WORKSPACE}/honor_src"
+          du -sh "${GITHUB_WORKSPACE}/honor_src" || true
+
+      # 2) 准备 AOSP android15-6.6 Kleaf 基础架构（prebuilts/build/tools）
+      - name: repo init & sync (Kleaf base, ${{ env.BRANCH }})
+        run: |
+          mkdir -p "${WS}" && cd "${WS}"
+          repo init -u https://android.googlesource.com/kernel/manifest -b "${BRANCH}" --depth=1
+          repo sync -c -j"$(nproc)" --no-tags --no-clone-bundle --force-sync \
+            2>&1 | tail -20
+          echo "== workspace top =="; ls -la
+
+      # 3) 用荣耀的 common kernel 覆盖 common/
+      - name: Overlay Honor common kernel
+        run: |
+          SRC="${GITHUB_WORKSPACE}/honor_src/Code_Opensource"
+          test -d "${SRC}/kernel" || { echo "::error::honor kernel dir not found"; exit 1; }
+          rsync -a --delete --exclude='.git' "${SRC}/kernel/" "${WS}/common/"
+          echo "== common top =="; ls "${WS}/common" | head -30
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)' "${WS}/common/Makefile"
+          ls "${WS}/common/arch/arm64/configs/" | grep -E 'gki_defconfig' || true
+
+      # 4) 构建 GKI（Kleaf / Bazel）
+      - name: Build GKI (//common:kernel_aarch64_dist)
+        run: |
+          cd "${WS}"
+          set -o pipefail
+          tools/bazel build --config=${{ github.event.inputs.bazel_config }} \
+            //common:kernel_aarch64_dist 2>&1 | tee "${GITHUB_WORKSPACE}/build.log"
+
+      # 5) 收集产物
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/out"
+          cd "${WS}"
+          # dist 目录 & gki artifacts
+          find bazel-bin/common -maxdepth 3 -type f \( \
+               -name 'Image*' -o -name '*.img' -o -name '*.tar.gz' \
+               -o -name 'system_dlkm*' -o -name 'boot*.img' -o -name 'System.map' \
+               -o -name 'vmlinux' -o -name '*.lz4' \) \
+               -exec cp -v {} "${GITHUB_WORKSPACE}/out/" \; || true
+          ls -laR "${GITHUB_WORKSPACE}/out" | head -60
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
+
+      - name: Upload kernel artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: honor-gki-${{ env.MODEL }}
+          path: out/*
+          if-no-files-found: error
