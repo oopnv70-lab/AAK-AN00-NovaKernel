@@ -39,7 +39,6 @@ env:
   BUILD_SYSTEM: ${{ github.event.inputs.build_system || 'kleaf' }}
   BRANCH: common-android15-6.6
   KP_DIR: ${{ github.workspace }}/kp
-  KERNEL_PLATFORM: ${{ github.workspace }}/kp/kernel_platform
 
 jobs:
   build:
@@ -118,7 +117,17 @@ jobs:
           repo sync -c --no-tags --optimized-fetch -j"$(nproc)" --force-sync
           echo "==== 拉取结果 ===="
           ls -la "$KP_DIR"
-          ls -la "$KERNEL_PLATFORM" | head -30
+          # AOSP kernel/manifest 直接把 common/build/prebuilts/tools 同步到当前目录(根下)；
+          # 只有 OnePlusOSS 这类 manifest 才多套一层 kernel_platform/。这里自动判别，避免写死。
+          if [ -d "$KP_DIR/kernel_platform/common" ]; then
+            ROOT="$KP_DIR/kernel_platform"
+          else
+            ROOT="$KP_DIR"
+          fi
+          echo "KERNEL_PLATFORM=$ROOT" >> "$GITHUB_ENV"
+          echo "识别到内核工程根目录: $ROOT"
+          test -d "$ROOT/common" || { echo "::error::找不到 $ROOT/common（manifest 拉取结构异常）"; exit 1; }
+          ls -la "$ROOT" | head -30
           du -sh "$KP_DIR"
           df -h /
 
