@@ -1,25 +1,31 @@
-name: Honor GKI Build (android15-6.6, make)
+name: Honor GKI Build & Pack (android15-6.6)
 
-# 参考已验证可用的 oopnv70-lab/Ace5-NovaKernel 的 make(legacy kbuild) 路线。
-# 荣耀这台是纯 GKI（kernel/ = AOSP common android15-6.6），所以：
-#   repo sync 出 AOSP common-android15-6.6 基础架构(prebuilts/clang + kernel-build-tools)
-#   → 用荣耀的 kernel/ 覆盖 common/ → make gki_defconfig + make all。
+# 目标：把荣耀开源包里的 kernel/（= AOSP common android15-6.6）纯 GKI 编译 + 打包。
+# 不带 KSU 管理器、不带 SUSFS/KPM/BBG 等任何特殊开关：就是原厂 gki_defconfig。
 #
-# 手动触发；同一时刻只允许一个构建。
+# 为什么默认 Kleaf(Bazel) 而不是 make：
+#   AOSP 官方《构建内核》明确写「Android 14 及更高版本不支持 build.sh」。
+#   Android 15 唯一官方 GKI 打包路径是：
+#       tools/bazel run //common:kernel_aarch64_dist -- --destdir=DIST
+#   它才会产出 GKI 的 boot.img / system_dlkm.img / Image / System.map / vmlinux。
+#   `make all` 只能编出裸 Image，不会打包成 GKI。
+#   （make 仍保留为 build_system=make 选项，仅用于快速验证「能编出 Image」。）
+#
+# 手动触发；并发去重。
 
 on:
   workflow_dispatch:
     inputs:
       model:
-        description: 'Honor model code (matches source zip file name)'
+        description: 'Honor model code (= source zip 文件名前缀)'
         required: true
         default: 'AAK-AN00'
-      build_target:
-        description: 'make 目标（all=Image+模块；Image=只要内核）'
+      build_system:
+        description: 'kleaf=官方GKI打包(boot.img/system_dlkm)；make=只编裸Image'
         required: true
-        default: 'all'
+        default: 'kleaf'
         type: choice
-        options: ['all', 'Image']
+        options: ['kleaf', 'make']
 
 concurrency:
   group: honor-gki-build
@@ -30,14 +36,14 @@ permissions:
 
 env:
   MODEL: ${{ github.event.inputs.model || 'AAK-AN00' }}
-  BUILD_TARGET: ${{ github.event.inputs.build_target || 'all' }}
+  BUILD_SYSTEM: ${{ github.event.inputs.build_system || 'kleaf' }}
   BRANCH: common-android15-6.6
   KP_DIR: ${{ github.workspace }}/kp
   KERNEL_PLATFORM: ${{ github.workspace }}/kp/kernel_platform
 
 jobs:
   build:
-    name: honor-gki
+    name: honor-gki-${{ github.event.inputs.build_system }}
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -62,7 +68,7 @@ jobs:
             git-core gnupg flex bison build-essential zip unzip curl zlib1g-dev \
             libc6-dev libncurses-dev libssl-dev libelf-dev bc cpio rsync \
             python3 python3-pip dwarves lz4 device-tree-compiler ccache \
-            file libarchive-tools
+            file libarchive-tools libxml2-utils
 
       - name: 记录 runner 指纹
         run: |
@@ -81,7 +87,8 @@ jobs:
           echo "$HOME/bin" >> "$GITHUB_PATH"
           ~/bin/repo --version
 
-      - name: 准备 ccache 缓存
+      - name: 准备 ccache 缓存（make 路用）
+        if: env.BUILD_SYSTEM == 'make'
         uses: actions/cache@v4
         with:
           path: ~/.ccache
@@ -98,7 +105,7 @@ jobs:
           ./scripts/fetch_honor_source.sh "${MODEL}" "${GITHUB_WORKSPACE}/honor_src"
           du -sh "${GITHUB_WORKSPACE}/honor_src/Code_Opensource" || true
 
-      # 2) 准备 AOSP common-android15-6.6 基础架构（clang / kernel-build-tools）
+      # 2) AOSP kernel manifest（提供 build/、prebuilts/clang、prebuilts/bazel、tools/bazel）
       - name: repo init & sync (AOSP kernel manifest, ${{ env.BRANCH }})
         run: |
           set -euxo pipefail
@@ -110,10 +117,12 @@ jobs:
             -b "$BRANCH" --depth=1 --no-repo-verify
           repo sync -c --no-tags --optimized-fetch -j"$(nproc)" --force-sync
           echo "==== 拉取结果 ===="
-          ls -la "$KERNEL_PLATFORM"
+          ls -la "$KP_DIR"
+          ls -la "$KERNEL_PLATFORM" | head -30
           du -sh "$KP_DIR"
+          df -h /
 
-      # 3) 用荣耀的 kernel/ 覆盖 common/
+      # 3) 用荣耀 kernel/ 覆盖 common/
       - name: 覆盖 Honor common kernel
         run: |
           set -euxo pipefail
@@ -121,96 +130,99 @@ jobs:
           test -d "${SRC}/kernel" || { echo "::error::找不到荣耀 kernel 目录"; exit 1; }
           test -d "${KERNEL_PLATFORM}/common" || { echo "::error::kernel_platform/common 不存在（manifest 分支可能不对）"; exit 1; }
           rsync -a --delete --exclude='.git' "${SRC}/kernel/" "${KERNEL_PLATFORM}/common/"
-          echo "==== common 顶部 ===="; ls "${KERNEL_PLATFORM}/common" | head -30
-          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL)' "${KERNEL_PLATFORM}/common/Makefile"
-          echo "==== build.config.common 关键行 ===="
+          echo "==== 内核版本 ===="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)' "${KERNEL_PLATFORM}/common/Makefile"
+          echo "==== build.config.common ===="
           grep -E 'BRANCH|KMI_GENERATION|CLANG_VERSION' "${KERNEL_PLATFORM}/common/build.config.common" || true
+          echo "==== build.config.gki.aarch64 ===="
+          cat "${KERNEL_PLATFORM}/common/build.config.gki.aarch64" 2>/dev/null || true
 
-      # 4) 编译（make），参考 Ace5-NovaKernel 的既有做法
-      - name: 编译内核 (make ${{ env.BUILD_TARGET }})
+      # 4a) Kleaf（官方 GKI 打包：产出 boot.img / system_dlkm.img / Image ...）
+      - name: 编译并打包 GKI（Kleaf dist）
+        if: env.BUILD_SYSTEM == 'kleaf'
+        run: |
+          set -uo pipefail
+          cd "$KERNEL_PLATFORM"
+          LOG="$GITHUB_WORKSPACE/build.log"
+          DIST="$GITHUB_WORKSPACE/dist"
+          mkdir -p "$DIST"
+          echo "==== tools/bazel 存在性 ===="
+          ls -l tools/bazel || { echo "::error::缺少 tools/bazel（manifest 不对？）"; exit 1; }
+          T0=$(date +%s)
+          tools/bazel run --config=fast //common:kernel_aarch64_dist -- --destdir="$DIST" >>"$LOG" 2>&1 || {
+            echo "::error::Kleaf 构建失败"
+            {
+              echo "### ❌ Kleaf 构建失败（kernel_aarch64_dist）"
+              echo '```'
+              grep -inE 'error|FAILED|fatal|Exception' "$LOG" | head -40
+              echo '```'
+              echo "#### 日志末尾 60 行"
+              echo '```'; tail -60 "$LOG"; echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            grep -inE 'error|FAILED|fatal' "$LOG" | head -15 \
+              | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+            exit 1; }
+          T1=$(date +%s); echo "Kleaf 耗时 $((T1-T0))s"
+          echo "==== dist 内容 ===="
+          ls -la "$DIST" || true
+          tail -20 "$LOG"
+
+      # 4b) make（仅编 Image，快速验证）
+      - name: 编译裸 Image（make）
+        if: env.BUILD_SYSTEM == 'make'
         run: |
           set -uo pipefail
           COMMON="$KERNEL_PLATFORM/common"
           cd "$COMMON"
           LOG="$GITHUB_WORKSPACE/build.log"
-
           CLANG_DIR=$(find "$KERNEL_PLATFORM/prebuilts/clang/host/linux-x86" -maxdepth 2 -type d -name bin | head -1)
           export PATH="$CLANG_DIR:$PATH"
           export CCACHE_DIR="$HOME/.ccache"; export CCACHE_MAXSIZE="12G"
           clang --version | head -2
           PAHOLE_BIN="$KERNEL_PLATFORM/prebuilts/kernel-build-tools/linux-x86/bin/pahole"
-          [ -x "$PAHOLE_BIN" ] || echo "::warning::pahole 预编译件不在预期位置：$PAHOLE_BIN（走系统 pahole）"
-
+          [ -x "$PAHOLE_BIN" ] || echo "::warning::pahole 预编译件不在预期位置：$PAHOLE_BIN"
           make -j"$(nproc)" LLVM=1 ARCH=arm64 O=out gki_defconfig >>"$LOG" 2>&1 || {
             echo "::error::gki_defconfig 失败"; tail -40 "$LOG"; exit 1; }
           make -j"$(nproc)" LLVM=1 ARCH=arm64 O=out olddefconfig >>"$LOG" 2>&1 || {
             echo "::error::olddefconfig 失败"; tail -40 "$LOG"; exit 1; }
-
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -E '^CONFIG_(LOCALVERSION|KALLSYMS|MODULE_SIG_PROTECT)' out/.config | tee -a "$GITHUB_STEP_SUMMARY" || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-          ccache -s > "$GITHUB_WORKSPACE/ccache-before.txt" 2>&1 || true
-          T0=$(date +%s)
-          make -j"$(nproc)" \
-            LLVM=1 ARCH=arm64 \
-            CC="ccache clang" \
-            LD=ld.lld HOSTLD=ld.lld \
-            PAHOLE="$PAHOLE_BIN" \
-            O=out "$BUILD_TARGET" >>"$LOG" 2>&1 || {
-            echo "::error::内核编译失败"
-            {
-              echo "### ❌ 荣耀 GKI 编译失败"
-              echo '```'
-              grep -inE 'error:|fatal error|Error [0-9]|undefined!' "$LOG" | head -30
-              echo '```'
-              echo "#### 日志末尾 40 行"
-              echo '```'; tail -40 "$LOG"; echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            grep -inE 'error:|fatal error|undefined!' "$LOG" | head -12 \
-              | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+          make -j"$(nproc)" LLVM=1 ARCH=arm64 CC="ccache clang" LD=ld.lld HOSTLD=ld.lld \
+            PAHOLE="$PAHOLE_BIN" O=out all >>"$LOG" 2>&1 || {
+            echo "::error::make all 失败"
+            { echo "### ❌ make all 失败"; echo '```'
+              grep -inE 'error:|fatal error|undefined!' "$LOG" | head -30; echo '```'
+              echo '#### 末尾 40 行'; echo '```'; tail -40 "$LOG"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             exit 1; }
-          T1=$(date +%s); echo "编译耗时 $((T1-T0))s"
-          ccache -s > "$GITHUB_WORKSPACE/ccache-after.txt" 2>&1 || true
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp -v "$COMMON/out/arch/arm64/boot/Image" "$GITHUB_WORKSPACE/dist/" || true
+          cp -v "$COMMON/out/System.map" "$GITHUB_WORKSPACE/dist/" 2>/dev/null || true
           tail -15 "$LOG"
 
-      # 5) 校验 & 收集产物
-      - name: 校验并收集 Image
+      # 5) 汇总产物
+      - name: 汇总产物
         if: always()
         run: |
           set -uo pipefail
-          COMMON="$KERNEL_PLATFORM/common"
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          IMAGE="$COMMON/out/arch/arm64/boot/Image"
-          if [ -f "$IMAGE" ]; then
-            cp -v "$IMAGE" "$GITHUB_WORKSPACE/dist/"
-            echo "Image: $(du -h "$IMAGE" | cut -f1)"
-            if [ -f "$COMMON/out/include/config/kernel.release" ]; then
-              echo "kernel.release: $(cat "$COMMON/out/include/config/kernel.release")"
-            fi
-          else
-            echo "::warning::没有生成 Image（编译可能失败或目标不是 Image）"
-          fi
-          for f in System.map vmlinux Module.symvers; do
-            [ -f "$COMMON/out/$f" ] && cp -v "$COMMON/out/$f" "$GITHUB_WORKSPACE/dist/" || true
-          done
-          ls -laR "$GITHUB_WORKSPACE/dist" | head -40
+          echo "==== dist ===="
+          ls -laR "$GITHUB_WORKSPACE/dist" 2>/dev/null | head -60 || true
+          {
+            echo "### 产物清单"
+            echo '```'
+            ls -la "$GITHUB_WORKSPACE/dist" 2>/dev/null || echo "(空)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传编译日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: |
-            build.log
-            ccache-before.txt
-            ccache-after.txt
+          name: build-log-${{ env.BUILD_SYSTEM }}
+          path: build.log
           if-no-files-found: warn
 
-      - name: 上传内核产物
+      - name: 上传 GKI 产物
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: honor-gki-${{ env.MODEL }}
+          name: honor-gki-${{ env.MODEL }}-${{ env.BUILD_SYSTEM }}
           path: dist/*
           if-no-files-found: warn
