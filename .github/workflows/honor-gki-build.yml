@@ -153,57 +153,76 @@ jobs:
           echo "==== build.config.gki.aarch64 ===="
           cat "${KERNEL_PLATFORM}/common/build.config.gki.aarch64" 2>/dev/null || true
 
-      # 4a) Kleaf（官方 GKI 打包：产出 boot.img / system_dlkm.img / Image ...）
-      - name: 编译并打包 GKI 镜像
+      # 4a) Kleaf 三步：①编译内核 ②校验并收集 ③打包 GKI（顺序与参考项目一致）
+      - name: 编译内核（Kleaf build）
         if: env.BUILD_SYSTEM == 'kleaf'
         run: |
           set -uo pipefail
           cd "$KERNEL_PLATFORM"
           LOG="$GITHUB_WORKSPACE/build.log"
-          DIST="$GITHUB_WORKSPACE/dist"
-          mkdir -p "$DIST"
           echo "==== tools/bazel 存在性 ===="
           ls -l tools/bazel || { echo "::error::缺少 tools/bazel（manifest 不对？）"; exit 1; }
           T0=$(date +%s)
-          # dist 目录参数在官方文档里写法不一（--destdir / --dist_dir），不赌它：
-          # 先按 --dist_dir 跑；若因未知选项失败则不带 flag 重跑；最后无论哪种，都从 bazel-bin 兜底拷。
+          tools/bazel build --config=fast //common:kernel_aarch64 >>"$LOG" 2>&1 || {
+            echo "::error::内核编译失败（Kleaf build）"
+            { echo "### ❌ 内核编译失败"; echo '```'
+              grep -inE 'error|FAILED|fatal|Exception|ERROR' "$LOG" | head -40
+              echo '```'; echo "#### 末尾 60 行"; echo '```'; tail -60 "$LOG"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            grep -inE 'error|FAILED|fatal' "$LOG" | head -15 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+            exit 1; }
+          T1=$(date +%s); echo "编译耗时 $((T1-T0))s"
+          tail -15 "$LOG"
+
+      - name: 校验并收集产物
+        if: env.BUILD_SYSTEM == 'kleaf'
+        run: |
+          set -uo pipefail
+          cd "$KERNEL_PLATFORM"
+          DIST="$GITHUB_WORKSPACE/dist"; mkdir -p "$DIST"
+          KB="$KERNEL_PLATFORM/bazel-bin/common/kernel_aarch64"
+          echo "==== 校验 Image ===="
+          IMG=$(find "$KB" -maxdepth 3 \( -type f -o -type l \) -name Image -print -quit 2>/dev/null || true)
+          [ -z "$IMG" ] && IMG=$(find "$KERNEL_PLATFORM/bazel-bin" -maxdepth 8 \( -type f -o -type l \) -name Image -print -quit 2>/dev/null || true)
+          [ -z "$IMG" ] && { echo "::error::没找到 Image，编译未产出内核"; ls -la "$KB" 2>/dev/null | head; exit 1; }
+          cp -Lv "$IMG" "$DIST/Image"
+          echo "Image: $(du -h "$DIST/Image" | cut -f1)  (来自 $IMG)"
+          for f in System.map vmlinux; do
+            p=$(find "$KB" -maxdepth 3 \( -type f -o -type l \) -name "$f" -print -quit 2>/dev/null || true)
+            [ -z "$p" ] && p=$(find "$KERNEL_PLATFORM/bazel-bin" -maxdepth 8 \( -type f -o -type l \) -name "$f" -print -quit 2>/dev/null || true)
+            if [ -n "$p" ]; then cp -Lv "$p" "$DIST/"; else echo "::warning::未找到 $f"; fi
+          done
+          ls -la "$DIST"
+
+      - name: 打包 GKI 镜像（Kleaf dist）
+        if: env.BUILD_SYSTEM == 'kleaf'
+        run: |
+          set -uo pipefail
+          cd "$KERNEL_PLATFORM"
+          LOG="$GITHUB_WORKSPACE/build.log"
+          DIST="$GITHUB_WORKSPACE/dist"; mkdir -p "$DIST"
+          T0=$(date +%s)
+          # dist 目录参数官方有两种写法（--destdir / --dist_dir），不赌：先用 --dist_dir，失败则无参重跑
           rc=0
           tools/bazel run --config=fast //common:kernel_aarch64_dist -- --dist_dir="$DIST" >>"$LOG" 2>&1 || rc=$?
-          if [ "$rc" -ne 0 ] && [ -z "$(ls -A "$DIST" 2>/dev/null)" ] && grep -qiE "dist_dir|Unrecognized option|no such attribute" "$LOG"; then
-            echo "::warning::--dist_dir 不被接受，改为不带 dist 参数重跑（复用增量缓存）"
-            rc=0
-            tools/bazel run --config=fast //common:kernel_aarch64_dist >>"$LOG" 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ] && grep -qiE "dist_dir|Unrecognized option|no such attribute" "$LOG"; then
+            echo "::warning::--dist_dir 不被接受，改为不带 dist 参数重跑（复用缓存）"
+            rc=0; tools/bazel run --config=fast //common:kernel_aarch64_dist >>"$LOG" 2>&1 || rc=$?
           fi
           if [ "$rc" -ne 0 ]; then
-            echo "::error::Kleaf 构建失败"
-            {
-              echo "### ❌ Kleaf 构建失败（kernel_aarch64_dist）"
-              echo '```'
-              grep -inE 'error|FAILED|fatal|Exception|ERROR' "$LOG" | head -40
-              echo '```'
-              echo "#### 日志末尾 60 行"
-              echo '```'; tail -60 "$LOG"; echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            grep -inE 'error|FAILED|fatal' "$LOG" | head -15 \
-              | while IFS= read -r l; do echo "::error::${l:0:900}"; done
-            exit 1
+            echo "::error::GKI 打包失败"
+            grep -inE 'error|FAILED|fatal' "$LOG" | head -15 | while IFS= read -r l; do echo "::error::${l:0:900}"; done
+            tail -40 "$LOG"; exit 1
           fi
-          T1=$(date +%s); echo "Kleaf 耗时 $((T1-T0))s"
-
-          # 兜底：dist 目录若仍为空，从 bazel-bin / out 里把关键产物捞出来
-          if [ -z "$(ls -A "$DIST" 2>/dev/null)" ]; then
-            echo "::warning::dist 目录为空，尝试从 bazel-bin / out 兜底拷贝产物"
+          T1=$(date +%s); echo "打包耗时 $((T1-T0))s"
+          # 兜底：dist 无 boot.img/system_dlkm.img 时，从 bazel-bin 搜刮
+          if [ ! -f "$DIST/boot.img" ] && [ ! -f "$DIST/system_dlkm.img" ]; then
+            echo "::warning::dist 未见 boot.img/system_dlkm.img，尝试兜底拷贝"
             for base in "$KERNEL_PLATFORM/bazel-bin/common/kernel_aarch64_dist" "$KERNEL_PLATFORM/bazel-bin" "$KERNEL_PLATFORM/out"; do
               [ -d "$base" ] || continue
-              find "$base" -maxdepth 8 \( -type f -o -type l \) \
-                \( -name 'Image' -o -name 'Image.lz4' -o -name 'boot.img' -o -name 'system_dlkm.img' \
-                   -o -name 'System.map' -o -name 'vmlinux' -o -name '*.ko' \) \
-                -exec cp -nvL {} "$DIST"/ \; 2>/dev/null || true
+              find "$base" -maxdepth 8 \( -type f -o -type l \) \( -name 'boot.img' -o -name 'system_dlkm.img' -o -name 'Image.lz4' \) -exec cp -nvL {} "$DIST"/ \; 2>/dev/null || true
             done
           fi
-          echo "==== dist 内容 ===="
-          ls -la "$DIST" | head -40 || true
-          tail -20 "$LOG"
+          echo "==== dist 最终内容 ===="; ls -la "$DIST"
 
       # 4b) make（仅编 Image，快速验证）
       - name: 编译内核镜像（make 快速路线）
