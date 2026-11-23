@@ -1,6 +1,9 @@
 #!/bin/bash
 # 拉取荣耀开源发布中心的指定机型开源源码并解压（CI / 本地通用）
-# 解决下载链接"会过期 + 防盗链"的问题：每次实时查接口拿当前有效签名 URL，再带 Referer 下载。
+# 解决两个问题：
+#   1) 下载链接会过期 + 防盗链：每次实时查接口拿"当前有效"签名 URL，再带 Referer 下载。
+#   2) 包是**双层嵌套**：外层 AAK-xxx_Opensource.zip 里装的是 Code_Opensource.tar.gz，
+#      只 unzip 外层拿不到源码目录 —— 这里逐层递归展开，直到出现 Code_Opensource/。
 #
 # 用法: fetch_honor_source.sh [MODEL_CODE] [DEST_DIR]
 #   默认 MODEL_CODE=AAK-AN00 (荣耀 WIN RT), DEST_DIR=$PWD/honor_src
@@ -69,8 +72,48 @@ curl -L -A "$UA" -e "$REFERER" -b "$WORK/ck.txt" --max-time 3600 \
      --retry 3 --retry-delay 5 "$URL" -o "$ZIP" \
      -w '[+] HTTP=%{http_code} size=%{size_download}B time=%{time_total}s\n'
 
-echo "[*] 解压 ..."
+echo "[*] 解压外层 zip -> $DEST"
 unzip -q -o "$ZIP" -d "$DEST"
+
+# ---- 递归展开嵌套压缩包（zip 里套 tar.gz 是这家的常规操作）----
+extract_one() { # $1 = archive path
+  case "$1" in
+    *.tar.gz|*.tgz) tar -xzf "$1" -C "$DEST" ;;
+    *.tar)          tar -xf  "$1" -C "$DEST" ;;
+    *.zip)          unzip -q -o "$1" -d "$DEST" ;;
+    *) return 1 ;;
+  esac
+}
+for round in 1 2 3 4 5; do
+  # 找尚未展开的压缩包（排除最初下载的那个 ZIP 本体）
+  arch=$(find "$DEST" -type f \
+           \( -name '*.tar.gz' -o -name '*.tgz' -o -name '*.tar' -o -name '*.zip' \) \
+           ! -path "$ZIP" ! -name '*.__done__' -print -quit)
+  [ -z "$arch" ] && break
+  echo "[*] 展开嵌套压缩包(第 $round 层): ${arch#$DEST/}"
+  extract_one "$arch" || { echo "[!] 展开失败: $arch"; exit 4; }
+  # 改后缀标记，避免下一轮重复解同一个包
+  mv "$arch" "${arch}.__done__"
+done
+
+echo "[*] 校验源码目录 ..."
+if [ -d "$DEST/Code_Opensource" ]; then
+  SRC="$DEST/Code_Opensource"
+else
+  # 兜底：递归找一个 Code_Opensource 目录
+  SRC=$(find "$DEST" -type d -name 'Code_Opensource' -print -quit 2>/dev/null || true)
+fi
+if [ -z "${SRC:-}" ] || [ ! -d "${SRC:-/nonexistent}" ]; then
+  echo "[x] 解压后未见 Code_Opensource 目录，当前内容："
+  ls -la "$DEST"
+  exit 3
+fi
+# 如果是被多套了一层目录，搬正到 $DEST/Code_Opensource
+if [ "$SRC" != "$DEST/Code_Opensource" ]; then
+  echo "[*] 目录在 ${SRC}，移动到 $DEST/Code_Opensource"
+  mv "$SRC" "$DEST/Code_Opensource"
+fi
+
 echo "[+] 完成，源码目录: $DEST/Code_Opensource"
 ls -la "$DEST/Code_Opensource" | head
 rm -rf "$WORK"

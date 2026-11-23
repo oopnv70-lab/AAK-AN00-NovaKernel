@@ -43,7 +43,7 @@ env:
 
 jobs:
   build:
-    name: honor-gki-${{ github.event.inputs.build_system }}
+    name: 荣耀GKI构建
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     steps:
@@ -70,7 +70,7 @@ jobs:
             python3 python3-pip dwarves lz4 device-tree-compiler ccache \
             file libarchive-tools libxml2-utils
 
-      - name: 记录 runner 指纹
+      - name: 记录运行机指纹
         run: |
           set -uo pipefail
           echo "nproc=$(nproc)"
@@ -78,7 +78,7 @@ jobs:
           cat /sys/fs/cgroup/cpu.max 2>/dev/null || true
           df -h / | tail -1
 
-      - name: 安装 repo 工具
+      - name: 安装 repo 同步工具
         run: |
           set -euxo pipefail
           mkdir -p ~/bin
@@ -87,7 +87,7 @@ jobs:
           echo "$HOME/bin" >> "$GITHUB_PATH"
           ~/bin/repo --version
 
-      - name: 准备 ccache 缓存（make 路用）
+      - name: 准备编译缓存（make 路线用）
         if: env.BUILD_SYSTEM == 'make'
         uses: actions/cache@v4
         with:
@@ -106,7 +106,7 @@ jobs:
           du -sh "${GITHUB_WORKSPACE}/honor_src/Code_Opensource" || true
 
       # 2) AOSP kernel manifest（提供 build/、prebuilts/clang、prebuilts/bazel、tools/bazel）
-      - name: repo init & sync (AOSP kernel manifest, ${{ env.BRANCH }})
+      - name: 同步 AOSP 内核基础工程 (${{ env.BRANCH }})
         run: |
           set -euxo pipefail
           mkdir -p "$KP_DIR"
@@ -123,7 +123,7 @@ jobs:
           df -h /
 
       # 3) 用荣耀 kernel/ 覆盖 common/
-      - name: 覆盖 Honor common kernel
+      - name: 用荣耀源码覆盖 common 内核目录
         run: |
           set -euxo pipefail
           SRC="${GITHUB_WORKSPACE}/honor_src/Code_Opensource"
@@ -138,7 +138,7 @@ jobs:
           cat "${KERNEL_PLATFORM}/common/build.config.gki.aarch64" 2>/dev/null || true
 
       # 4a) Kleaf（官方 GKI 打包：产出 boot.img / system_dlkm.img / Image ...）
-      - name: 编译并打包 GKI（Kleaf dist）
+      - name: 编译并打包 GKI 镜像
         if: env.BUILD_SYSTEM == 'kleaf'
         run: |
           set -uo pipefail
@@ -168,7 +168,7 @@ jobs:
           tail -20 "$LOG"
 
       # 4b) make（仅编 Image，快速验证）
-      - name: 编译裸 Image（make）
+      - name: 编译内核镜像（make 快速路线）
         if: env.BUILD_SYSTEM == 'make'
         run: |
           set -uo pipefail
@@ -215,7 +215,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-${{ env.BUILD_SYSTEM }}
+          name: 编译日志-${{ env.BUILD_SYSTEM }}
           path: build.log
           if-no-files-found: warn
 
@@ -223,6 +223,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: honor-gki-${{ env.MODEL }}-${{ env.BUILD_SYSTEM }}
+          name: GKI产物-${{ env.MODEL }}-${{ env.BUILD_SYSTEM }}
           path: dist/*
           if-no-files-found: warn
