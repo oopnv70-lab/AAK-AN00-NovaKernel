@@ -30,11 +30,13 @@ Code_Opensource/
 所以必须配一套 AOSP `common-android15-6.6` 的 kernel_platform 基础架构，再把荣耀 `kernel/` 覆盖进其 `common/`。
 
 ## 三、构建流程（见 .github/workflows/honor-gki-build.yml）
+> 参考已验证可开机的 `oopnv70-lab/Ace5-NovaKernel`：它走的是 **make(legacy kbuild)**，不是 bazel。6.1 的 builtin 内核 `make ... O=out all` 实测成功。所以这里也用 make。
+
 1. `scripts/fetch_honor_source.sh`：实时查荣耀接口→拿"当前有效"签名 URL→带 Referer 下载→解压（解决链接过期/防盗链）。
-2. `repo init -u https://android.googlesource.com/kernel/manifest -b common-android15-6.6 --depth=1` + `repo sync`（拿 prebuilts/build/tools）。
+2. `repo init -u https://android.googlesource.com/kernel/manifest -b common-android15-6.6 --depth=1` + `repo sync`（拿 prebuilts/clang、prebuilts/kernel-build-tools/pahole）。
 3. `rsync` 用荣耀 `kernel/` 覆盖 `common/`（保留 .git）。
-4. `tools/bazel build --config=fast //common:kernel_aarch64_dist`。
-5. 收集 Image / boot*.img / system_dlkm / System.map / vmlinux 并上传 artifact。
+4. `make LLVM=1 ARCH=arm64 O=out gki_defconfig` → `olddefconfig` → `make -j ... CC="ccache clang" LD=ld.lld O=out all`。
+5. 校验 `out/arch/arm64/boot/Image`，收集 Image / System.map / vmlinux / Module.symvers 上传 artifact。
 
 ## 四、风险 & 首轮要验证的点
 - **磁盘**：GitHub 托管 runner 空间紧，repo 全量约 13GB + 构建产物；workflow 已先清盘，若仍不够需换 larger runner 或裁剪 manifest。
