@@ -1,4 +1,4 @@
-name: Honor GKI Build & Pack (android15-6.6)
+name: 荣耀GKI编译与打包 (android15-6.6)
 
 # 目标：把荣耀开源包里的 kernel/（= AOSP common android15-6.6）纯 GKI 编译 + 打包。
 # 不带 KSU 管理器、不带 SUSFS/KPM/BBG 等任何特殊开关：就是原厂 gki_defconfig。
@@ -139,6 +139,13 @@ jobs:
           test -d "${SRC}/kernel" || { echo "::error::找不到荣耀 kernel 目录"; exit 1; }
           test -d "${KERNEL_PLATFORM}/common" || { echo "::error::kernel_platform/common 不存在（manifest 分支可能不对）"; exit 1; }
           rsync -a --delete --exclude='.git' "${SRC}/kernel/" "${KERNEL_PLATFORM}/common/"
+          # ---- 覆盖后硬校验：--delete 有风险，必须要的关键文件缺一个就当场失败，别等到 bazel 跑一半才炸 ----
+          miss=0
+          for f in Makefile Kbuild BUILD.bazel build.config.gki.aarch64 \
+                   arch/arm64/configs/gki_defconfig; do
+            if [ -e "${KERNEL_PLATFORM}/common/$f" ]; then echo "  ✓ common/$f"; else echo "  ✗ common/$f"; miss=1; fi
+          done
+          [ "$miss" -eq 0 ] || { echo "::error::覆盖后 common/ 缺关键文件（荣耀压缩包结构可能变了）"; ls -la "${KERNEL_PLATFORM}/common" | head; exit 1; }
           echo "==== 内核版本 ===="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)' "${KERNEL_PLATFORM}/common/Makefile"
           echo "==== build.config.common ===="
@@ -158,22 +165,44 @@ jobs:
           echo "==== tools/bazel 存在性 ===="
           ls -l tools/bazel || { echo "::error::缺少 tools/bazel（manifest 不对？）"; exit 1; }
           T0=$(date +%s)
-          tools/bazel run --config=fast //common:kernel_aarch64_dist -- --destdir="$DIST" >>"$LOG" 2>&1 || {
+          # dist 目录参数在官方文档里写法不一（--destdir / --dist_dir），不赌它：
+          # 先按 --dist_dir 跑；若因未知选项失败则不带 flag 重跑；最后无论哪种，都从 bazel-bin 兜底拷。
+          rc=0
+          tools/bazel run --config=fast //common:kernel_aarch64_dist -- --dist_dir="$DIST" >>"$LOG" 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ] && [ -z "$(ls -A "$DIST" 2>/dev/null)" ] && grep -qiE "dist_dir|Unrecognized option|no such attribute" "$LOG"; then
+            echo "::warning::--dist_dir 不被接受，改为不带 dist 参数重跑（复用增量缓存）"
+            rc=0
+            tools/bazel run --config=fast //common:kernel_aarch64_dist >>"$LOG" 2>&1 || rc=$?
+          fi
+          if [ "$rc" -ne 0 ]; then
             echo "::error::Kleaf 构建失败"
             {
               echo "### ❌ Kleaf 构建失败（kernel_aarch64_dist）"
               echo '```'
-              grep -inE 'error|FAILED|fatal|Exception' "$LOG" | head -40
+              grep -inE 'error|FAILED|fatal|Exception|ERROR' "$LOG" | head -40
               echo '```'
               echo "#### 日志末尾 60 行"
               echo '```'; tail -60 "$LOG"; echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             grep -inE 'error|FAILED|fatal' "$LOG" | head -15 \
               | while IFS= read -r l; do echo "::error::${l:0:900}"; done
-            exit 1; }
+            exit 1
+          fi
           T1=$(date +%s); echo "Kleaf 耗时 $((T1-T0))s"
+
+          # 兜底：dist 目录若仍为空，从 bazel-bin / out 里把关键产物捞出来
+          if [ -z "$(ls -A "$DIST" 2>/dev/null)" ]; then
+            echo "::warning::dist 目录为空，尝试从 bazel-bin / out 兜底拷贝产物"
+            for base in "$KERNEL_PLATFORM/bazel-bin/common/kernel_aarch64_dist" "$KERNEL_PLATFORM/bazel-bin" "$KERNEL_PLATFORM/out"; do
+              [ -d "$base" ] || continue
+              find "$base" -maxdepth 8 \( -type f -o -type l \) \
+                \( -name 'Image' -o -name 'Image.lz4' -o -name 'boot.img' -o -name 'system_dlkm.img' \
+                   -o -name 'System.map' -o -name 'vmlinux' -o -name '*.ko' \) \
+                -exec cp -nvL {} "$DIST"/ \; 2>/dev/null || true
+            done
+          fi
           echo "==== dist 内容 ===="
-          ls -la "$DIST" || true
+          ls -la "$DIST" | head -40 || true
           tail -20 "$LOG"
 
       # 4b) make（仅编 Image，快速验证）
