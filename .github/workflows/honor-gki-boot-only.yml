@@ -36,6 +36,11 @@ on:
         required: false
         default: true
         type: boolean
+      strict_abi_check:
+        description: '是否做严格 ABI/KMI 校验（STG 全类型图比对，含保护符号表；默认关闭；开启后只报告不阻断）'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: honor-gki-boot-only
@@ -50,6 +55,7 @@ env:
   SYNC_LINUX_SECURITY: ${{ github.event.inputs.sync_linux_security || 'false' }}
   MANAGER: ${{ github.event.inputs.manager || 'sukisu_nova' }}
   ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs || 'true' }}
+  STRICT_ABI_CHECK: ${{ github.event.inputs.strict_abi_check || 'false' }}
   KP_DIR: ${{ github.workspace }}/kp
 
 jobs:
@@ -263,6 +269,37 @@ jobs:
             exit 1; }
           T1=$(date +%s); echo "编译耗时 $((T1-T0))s"
           tail -15 "$LOG"
+
+      - name: 严格 ABI/KMI 校验（STG 全类型图比对，只报告不阻断）
+        if: env.STRICT_ABI_CHECK == 'true'
+        run: |
+          set -uo pipefail
+          cd "$KERNEL_PLATFORM"
+          # Kleaf 官方 ABI 校验 target：把编译产物实际 ABI 与 android/abi_gki_aarch64.stg
+          # 做 STG 全类型图精确 diff（符号缺失/结构体字段变化/枚举增删/字节大小变化都会报）。
+          # exit code 非 0 = 检测到 ABI 变化（带 KSU+SUSFS 几乎必然非 0，属预期，不阻断）。
+          echo "==> 运行 kleaf ABI 校验: //common:kernel_aarch64_abi_dist"
+          ABILOG="$GITHUB_WORKSPACE/abi_check.log"
+          if tools/bazel run --config=fast \
+              //common:kernel_aarch64_abi_dist -- --destdir="$GITHUB_WORKSPACE/out_abi" \
+              >"$ABILOG" 2>&1; then
+            echo "  ✅ ABI 无变化（与 abi_gki_aarch64.stg 完全一致）"
+          else
+            echo "  ⚠ 检测到 ABI 变化（带 KSU/SUSFS 属预期，仅报告不阻断）"
+          fi
+          # 提取 diff 报告（若存在）写入 step summary
+          DIFF=$(find "$GITHUB_WORKSPACE/out_abi" -name 'abi.report*' -o -name 'abi_diff*' 2>/dev/null | head -1)
+          {
+            echo '### 严格 ABI/KMI 校验结果'
+            echo '- 校验 target: //common:kernel_aarch64_abi_dist（STG 全类型图比对）'
+            echo '- 参考定义: common/android/abi_gki_aarch64.stg'
+            echo ''
+            echo '```'
+            grep -iE 'diff|break|added|removed|changed|error|symbol' "$ABILOG" | head -60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo '==== ABI 校验日志末尾 40 行 ===='
+          tail -40 "$ABILOG"
 
       - name: 取出产物（仅 boot.img）
         run: |
