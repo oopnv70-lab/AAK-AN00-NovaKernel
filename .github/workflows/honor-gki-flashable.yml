@@ -109,68 +109,82 @@ jobs:
           done
           [ "$miss" -eq 0 ] || { echo "::error::覆盖后 common/ 缺关键文件"; exit 1; }
 
-      - name: 编译并打包 GKI（Kleaf dist）
+      - name: 编译 GKI 内核（只编 boot 与 system_dlkm 需要的 target）
         run: |
           set -uo pipefail
           cd "$KERNEL_PLATFORM"
-          LOG="$GITHUB_WORKSPACE/build.log"; DIST="$GITHUB_WORKSPACE/dist"; mkdir -p "$DIST"
+          LOG="$GITHUB_WORKSPACE/build.log"
           ls -l tools/bazel || { echo "::error::缺少 tools/bazel"; exit 1; }
           T0=$(date +%s)
-          tools/bazel run --config=fast //common:kernel_aarch64_dist -- --dist_dir="$DIST" >>"$LOG" 2>&1 || {
-            echo "::error::Kleaf 构建/打包失败"
-            { echo "### ❌ Kleaf 失败"; echo '```'
-              grep -inE 'error|FAILED|fatal|Exception|ERROR' "$LOG" | head -40; echo '```'
+          # 只建两个 target（名字来自 kleaf common_kernels.bzl 的 define_common_kernels）：
+          #   //common:kernel_aarch64_gki_artifacts -> boot.img / boot-gz / boot-lz4 / gki-info.txt
+          #   //common:kernel_aarch64_images        -> system_dlkm.ext4.img / system_dlkm.erofs.img
+          # 不建 //common:kernel_aarch64_dist：
+          #   uapi_headers、ddk_artifacts、ddk_headers_archive、modules_install 拷贝、
+          #   gki_certification_tools、init_ddk_zip、sbom、abi symbollist、test zips 全部不生成
+          tools/bazel build --config=fast \
+            //common:kernel_aarch64_gki_artifacts \
+            //common:kernel_aarch64_images >>"$LOG" 2>&1 || {
+            echo "::error::GKI 编译失败"
+            { echo "### ❌ GKI 编译失败"; echo '```'
+              grep -inE 'error|FAILED|fatal|Exception' "$LOG" | head -40; echo '```'
               echo '#### 末尾 60 行'; echo '```'; tail -60 "$LOG"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             exit 1; }
-          T1=$(date +%s); echo "构建+打包耗时 $((T1-T0))s"
-          ls -la "$DIST" | head -40
+          T1=$(date +%s); echo "编译耗时 $((T1-T0))s"
+          tail -15 "$LOG"
 
-      - name: 只保留可刷机镜像
+      - name: 取出镜像（boot.img + system_dlkm）
         run: |
           set -uo pipefail
-          D="$GITHUB_WORKSPACE/dist"; F="$GITHUB_WORKSPACE/flash"; mkdir -p "$F"
-          need_fail=0
-          # boot.img 必要
-          if [ -f "$D/boot.img" ]; then cp -v "$D/boot.img" "$F/"; else echo "::error::缺 boot.img"; need_fail=1; fi
-          # system_dlkm：ext4 / erofs 两种文件系统都给（设备用哪个刷哪个），有就带、没有不致命
-          for n in system_dlkm.ext4.img system_dlkm.erofs.img; do
-            if [ -f "$D/$n" ]; then cp -v "$D/$n" "$F/"; else echo "::warning::缺 $n"; fi
-          done
-          [ "$need_fail" -eq 0 ] || exit 1
+          cd "$KERNEL_PLATFORM"
+          F="$GITHUB_WORKSPACE/flash"; mkdir -p "$F"
+          EXEC=$(tools/bazel info execution_root 2>/dev/null)
+          echo "execroot=$EXEC"
+          FILES=$(tools/bazel cquery --output=files \
+            //common:kernel_aarch64_gki_artifacts \
+            //common:kernel_aarch64_images 2>/dev/null || true)
+          echo '==== cquery 产物清单 ===='; printf '%s\n' "$FILES" | head -40
 
-          REL=$(sed -n 's/^kernel_release=//p' "$D/gki-info.txt" 2>/dev/null | head -1)
-          [ -z "$REL" ] && REL="unknown"
+          take() {
+            n="$1"; src=""
+            p=$(printf '%s\n' "$FILES" | grep -E "(^|/)$n\$" | head -1)
+            if [ -n "$p" ]; then
+              if [ -f "$p" ]; then src="$p"; else src="$EXEC/$p"; fi
+            fi
+            if [ ! -f "$src" ]; then
+              src=$(find "$EXEC" -maxdepth 9 -type f -name "$n" -path '*kernel_aarch64*' 2>/dev/null | head -1)
+            fi
+            if [ -n "$src" ] && [ -f "$src" ]; then cp -v "$src" "$F/$n"; return 0; fi
+            return 1
+          }
+
+          rc=0
+          take boot.img || { echo "::error::没有产出 boot.img"; rc=1; }
+          take system_dlkm.ext4.img || echo "::warning::没有 system_dlkm.ext4.img"
+          take system_dlkm.erofs.img || echo "::warning::没有 system_dlkm.erofs.img"
+          [ "$rc" -eq 0 ] || exit 1
+
+          INFO=$(find "$EXEC" -maxdepth 9 -type f -name 'gki-info.txt' -path '*kernel_aarch64*' 2>/dev/null | head -1)
+          REL="unknown"
+          if [ -n "$INFO" ]; then
+            echo '==== gki-info.txt ===='; cat "$INFO"
+            REL=$(sed -n 's/^kernel_release=//p' "$INFO" | head -1); [ -z "$REL" ] && REL="unknown"
+          fi
+
+          echo '==== 最终镜像 ===='; ls -la "$F"
           {
-            echo "Honor GKI 可刷镜像"
-            echo "型号: ${MODEL}"
-            echo "kernel_release: ${REL}"
-            echo "构建: run ${GITHUB_RUN_ID}  commit ${GITHUB_SHA}"
-            echo
-            echo "== 刷机（fastboot）=="
-            echo "fastboot flash boot boot.img"
-            echo "fastboot flash system_dlkm system_dlkm.ext4.img   # 或 system_dlkm.erofs.img（按设备分区文件系统选）"
-            echo
-            echo "== 注意 =="
-            echo "1) 自编译 GKI 未用 Google 私钥签名，AVB 校验可能拒绝；需解锁 BL / 关闭校验。"
-            echo "2) 公开源码为 6.6.56，若真机固件内核版本不同（如 6.6.89），vermagic 不匹配，刷入无法开机。"
-            echo "3) boot.img 只含内核；ramdisk 在 init_boot，本包不改 init_boot。"
-          } > "$F/README.txt"
-          ( cd "$F" && sha256sum * > SHA256SUMS.txt 2>/dev/null || true )
-          echo "==== 可刷镜像清单 ===="
-          ls -la "$F"
-          {
-            echo "### 可刷镜像"
-            echo '```'
-            ls -la "$F"
-            echo '```'
-            echo "- kernel_release: \`${REL}\`"
+            echo '### GKI 镜像'
+            echo '```'; ls -la "$F"; echo '```'
+            echo "- kernel_release: \`$REL\`"
+            echo '- 刷入：`fastboot flash boot boot.img` / `fastboot flash system_dlkm system_dlkm.ext4.img`'
+            echo '- 注：未用 Google 私钥签名，AVB 可能拒绝；源码 6.6.56 与真机版本不一致则开不了机。'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 上传可刷镜像
+      - name: 上传镜像
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: 可刷GKI-${{ env.MODEL }}
+          name: GKI镜像-${{ env.MODEL }}
           path: flash/*
           if-no-files-found: warn
 
