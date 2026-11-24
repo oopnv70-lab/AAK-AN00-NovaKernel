@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # 集成 SukiSU-Nova（builtin-new 分支，CONFIG_KSU=y 内置）到荣耀 GKI 内核树。
-# 用法：integrate_sukisu.sh <KERNEL_PLATFORM>   （KERNEL_PLATFORM 是含 common/ 的内核工程根）
+# 用法：integrate_sukisu.sh <KERNEL_PLATFORM> [MANAGER]
+#   KERNEL_PLATFORM —— 含 common/ 的内核工程根
+#   MANAGER —— 内置管理器代号（可选，默认 sukisu_nova）。
+#              当前仅支持 sukisu_nova，其他管理器「暂不支持」（预留扩展位，未来加映射项即可）。
 #
 # 分两部分：
 #   A. 内核源码侧（软链 + Kconfig/Makefile 注入）——与 SukiSU-Nova builtin-new 官方 setup.sh 一致
 #      但 clone 源固定为 GitHub（builtin-new 分支，避开自建 git 服务器）。
+#      另：根据 MANAGER 改写 kernel/Makefile 里的管理器三件套（包名/size/hash）。
 #   B. Kleaf 配置侧（正确方式：defconfig fragment，而不是改 gki_defconfig 本体）——
 #      生成 common/ksu_defconfig fragment，并在 common/BUILD.bazel 的
 #      define_common_kernels(target_configs={"kernel_aarch64": {...}}) 字典里注入
@@ -17,7 +21,8 @@
 # 不碰 SUSFS / KPM / ARM64_BRANCH_LINK / TAMPER_SYSCALL_TABLE（全部保持默认 n）。
 set -euo pipefail
 
-ROOT="${1:?用法: integrate_sukisu.sh <KERNEL_PLATFORM>}"
+ROOT="${1:?用法: integrate_sukisu.sh <KERNEL_PLATFORM> [MANAGER]}"
+MANAGER="${2:-sukisu_nova}"
 COMMON="${ROOT}/common"
 DRI="${COMMON}/drivers"
 MAKEFILE="${DRI}/Makefile"
@@ -25,7 +30,26 @@ KCONFIG="${DRI}/Kconfig"
 BUILD_BAZEL="${COMMON}/BUILD.bazel"
 FRAGMENT="${COMMON}/ksu_defconfig"
 
+# ============ 管理器映射表（代号 → 包名 / 签名 size / 签名 hash）============
+# 当前仅 sukisu_nova。未来支持其他管理器时，在此追加一行 case 分支即可，
+# 无需改下面的 sed 替换逻辑。
+manager_identity() {
+  case "$MANAGER" in
+    sukisu_nova)
+      PKG_NAME="com.sukisu.nova"
+      PKG_SIZE="0x35c"
+      PKG_HASH="947ae944f3de4ed4c21a7e4f7953ecf351bfa2b36239da37a34111ad29993eef"
+      ;;
+    *)
+      echo "::error::不支持的管理器代号: $MANAGER（当前仅支持 sukisu_nova）" >&2
+      exit 1
+      ;;
+  esac
+}
+manager_identity
+
 echo "==> KERNEL_PLATFORM = $ROOT"
+echo "==> MANAGER = $MANAGER ($PKG_NAME)"
 test -d "$COMMON" || { echo "::error::找不到 common/ ($COMMON)"; exit 1; }
 test -d "$DRI" || { echo "::error::找不到 drivers/ ($DRI)"; exit 1; }
 test -f "$BUILD_BAZEL" || { echo "::error::找不到 common/BUILD.bazel ($BUILD_BAZEL)"; exit 1; }
@@ -49,6 +73,19 @@ if [ -L "$DRI/kernelsu" ] || [ -e "$DRI/kernelsu" ]; then
 fi
 ln -sf "$(realpath --relative-to="$DRI" "$ROOT/KernelSU/kernel")" "$DRI/kernelsu"
 echo "==> 软链: $DRI/kernelsu -> $(readlink -f "$DRI/kernelsu")"
+
+# A2.5) 根据 MANAGER 改写 kernel/Makefile 里的管理器三件套（包名/size/hash）
+#       builtin-new 的 kernel/Makefile 第 88-90 行是编译期常量，通过 -D 传给编译器；
+#       这里按映射表精确 sed 替换，未来加新管理器只需在映射表加 case 分支。
+KSU_MAKEFILE="$DRI/kernelsu/Makefile"
+test -f "$KSU_MAKEFILE" || { echo "::error::找不到 kernelsu/Makefile ($KSU_MAKEFILE)"; exit 1; }
+sed -i \
+  -e "s|^KSU_PACKAGE_NAME := .*|KSU_PACKAGE_NAME := ${PKG_NAME}|" \
+  -e "s|^KSU_EXPECTED_SIZE := .*|KSU_EXPECTED_SIZE := ${PKG_SIZE}|" \
+  -e "s|^KSU_EXPECTED_HASH := .*|KSU_EXPECTED_HASH := ${PKG_HASH}|" \
+  "$KSU_MAKEFILE"
+echo "==> 已按 $MANAGER 改写 kernelsu/Makefile 三件套:"
+grep -E '^KSU_PACKAGE_NAME|^KSU_EXPECTED_SIZE|^KSU_EXPECTED_HASH' "$KSU_MAKEFILE"
 
 # A3) Makefile 注入
 if grep -q "CONFIG_KSU" "$MAKEFILE"; then
@@ -122,5 +159,6 @@ test -f "$DRI/kernelsu/Makefile" && echo "  ✓ drivers/kernelsu/Makefile 存在
 test -f "$FRAGMENT" && echo "  ✓ ksu_defconfig fragment 存在" || { echo "  ✗ fragment 缺失"; exit 1; }
 grep -q '"defconfig_fragments": \["ksu_defconfig"\]' "$BUILD_BAZEL" && echo "  ✓ BUILD.bazel 有 defconfig_fragments" || { echo "  ✗ BUILD.bazel 缺 defconfig_fragments"; exit 1; }
 grep -q '^CONFIG_KSU=' "${COMMON}/arch/arm64/configs/gki_defconfig" && { echo "  ✗ gki_defconfig 被污染（含 CONFIG_KSU），不允许"; exit 1; } || echo "  ✓ gki_defconfig 本体干净（无 CONFIG_KSU）"
+grep -q "^KSU_PACKAGE_NAME := ${PKG_NAME}" "$DRI/kernelsu/Makefile" && echo "  ✓ 管理器包名 = $PKG_NAME" || { echo "  ✗ 管理器包名未正确写入 kernelsu/Makefile"; exit 1; }
 
-echo "==> SukiSU-Nova 集成完成（fragment 方式）"
+echo "==> SukiSU-Nova 集成完成（fragment 方式，管理器=$MANAGER）"
