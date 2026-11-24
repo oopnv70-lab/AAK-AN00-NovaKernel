@@ -64,6 +64,59 @@ if [ "$n_rej" -gt 0 ]; then
 fi
 tail -20 /tmp/susfs-main-apply.log
 
+# ============ 2.5) 补齐已知 .rej 的 susfs_def.h include（荣耀 6.6 树专属） ============
+# 背景（本地源码树 grep 坐实，非类推）：
+#   荣耀 sm8650/android15-6.6 树的 mm/memory.c、fs/proc/base.c 两个文件
+#   【不 include】 <linux/zswap.h> / <linux/dma-buf.h>（头文件本身在树里完好，
+#   只是这两个 .c 文件不再引用）。上游补丁以这两个 include 行当锚点，
+#   在其后插入 #include <linux/susfs_def.h>，锚点缺失导致 Hunk #1 FAILED。
+#
+#   注意：缺的不是 zswap.h/dma-buf.h 本身（它们无关紧要），而是 susfs_def.h
+#   这个 include——它的 Hunk #2（真正用到 SUSFS_IS_INODE_SUS_MAP 等宏的代码）
+#   已经成功打上，宏定义却在 susfs_def.h 里。不补 include 编译必报 undeclared。
+#
+#   修复：在这两个文件的【现存锚点】后手动插入 susfs_def.h include，
+#   与上游补丁意图完全一致，不碰荣耀的 zswap/dma-buf 逻辑。
+fix_rej_include() {
+  local file="$1" anchor="$2" guard="$3"
+  local abs="$COMMON/$file"
+  test -f "$abs" || { echo "  ⚠ 找不到 $file，跳过"; return 0; }
+  # 幂等：已 include 过则跳过
+  if grep -q 'susfs_def.h' "$abs"; then
+    echo "  ✓ $file 已 include susfs_def.h，跳过"
+    return 0
+  fi
+  # 锚点必须存在（唯一匹配）
+  if ! grep -qF "$anchor" "$abs"; then
+    echo "  ✗ $file 缺锚点「$anchor」，无法补齐 include（需人工介入）"
+    return 1
+  fi
+  # 在锚点行后插入 guard + susfs_def.h + endif（用 awk，锚点用 index() 做前缀匹配，
+  # 避免 sed 多行 a 命令在 shell/JSON 层层转义下出错）
+  awk -v anchor="$anchor" -v guard="$guard" '
+    { print }
+    index($0, anchor) == 1 {
+      print guard
+      print "#include <linux/susfs_def.h>"
+      print "#endif"
+    }
+  ' "$abs" > "$abs.tmp" && mv "$abs.tmp" "$abs"
+  # 校验插入结果
+  grep -q 'susfs_def.h' "$abs" || { echo "  ✗ $file 插入后仍无 susfs_def.h"; return 1; }
+  echo "  ✓ $file 已补齐 susfs_def.h include（guard: $guard）"
+  # 清理对应的 .rej
+  rm -f "$abs.rej"
+}
+
+echo "==> 补齐已知 .rej 的 susfs_def.h include"
+fix_rej_include "mm/memory.c" \
+  "#include <linux/sched/sysctl.h>" \
+  "#ifdef CONFIG_KSU_SUSFS_SUS_MAP" || { echo "::error::mm/memory.c include 补齐失败"; exit 1; }
+fix_rej_include "fs/proc/base.c" \
+  "#include <linux/cpufreq_times.h>" \
+  "#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)" || { echo "::error::fs/proc/base.c include 补齐失败"; exit 1; }
+echo "==> 补齐完成，剩余 .rej：$(find "$COMMON" -name '*.rej' 2>/dev/null | wc -l)"
+
 # ============ 3) 复制 3 个新增文件 ============
 echo "==> 复制 3 个新增文件（fs/susfs.c + include/linux/susfs.{h,def.h}）"
 for rel in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
