@@ -114,12 +114,19 @@ jobs:
           set -euxo pipefail
           chmod +x scripts/integrate_sukisu.sh
           ./scripts/integrate_sukisu.sh "${KERNEL_PLATFORM}"
-          # 关键验证：软链与 config 是否就位
+          # 关键验证：软链 / fragment / BUILD.bazel 注入 是否就位
           test -f "${KERNEL_PLATFORM}/common/drivers/kernelsu/Kconfig" || exit 1
           test -f "${KERNEL_PLATFORM}/common/drivers/kernelsu/Makefile" || exit 1
-          grep -q '^CONFIG_KSU=y' "${KERNEL_PLATFORM}/common/arch/arm64/configs/gki_defconfig" || exit 1
-          echo '==== gki_defconfig 末尾（含 KSU 段）===='
-          tail -12 "${KERNEL_PLATFORM}/common/arch/arm64/configs/gki_defconfig"
+          # fragment 方案：CONFIG_KSU=y 在 ksu_defconfig fragment 里，gki_defconfig 本体必须干净
+          test -f "${KERNEL_PLATFORM}/common/ksu_defconfig" || { echo "::error::缺 ksu_defconfig"; exit 1; }
+          grep -q '^CONFIG_KSU=y' "${KERNEL_PLATFORM}/common/ksu_defconfig" || { echo "::error::fragment 缺 CONFIG_KSU=y"; exit 1; }
+          if grep -q '^CONFIG_KSU=' "${KERNEL_PLATFORM}/common/arch/arm64/configs/gki_defconfig"; then
+            echo "::error::gki_defconfig 被污染（含 CONFIG_KSU），Kleaf minimized 校验必失败"; exit 1;
+          fi
+          grep -q '"defconfig_fragments": \["ksu_defconfig"\]' "${KERNEL_PLATFORM}/common/BUILD.bazel" \
+            || { echo "::error::BUILD.bazel 未注入 defconfig_fragments"; exit 1; }
+          echo '==== ksu_defconfig fragment 内容 ===='
+          cat "${KERNEL_PLATFORM}/common/ksu_defconfig"
 
       - name: 编译 GKI 内核（Kleaf，只编需要的 target）
         run: |
