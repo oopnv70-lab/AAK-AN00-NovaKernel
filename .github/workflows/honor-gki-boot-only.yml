@@ -31,6 +31,11 @@ on:
         type: choice
         options:
           - sukisu_nova
+      enable_susfs:
+        description: '是否集成 SUSFS（路径隐藏/重定向/maps 欺骗等；默认开启）'
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: honor-gki-boot-only
@@ -44,6 +49,7 @@ env:
   BRANCH: common-android15-6.6
   SYNC_LINUX_SECURITY: ${{ github.event.inputs.sync_linux_security || 'false' }}
   MANAGER: ${{ github.event.inputs.manager || 'sukisu_nova' }}
+  ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs || 'true' }}
   KP_DIR: ${{ github.workspace }}/kp
 
 jobs:

@@ -109,7 +109,7 @@ fi
 cat > "$FRAGMENT" <<'EOF'
 # SukiSU-Nova (builtin) defconfig fragment —— 通过 define_common_kernels 的
 # defconfig_fragments 注入（post-defconfig 语义），不直接改 gki_defconfig。
-# SUSFS / KPM 均不启用（保持默认 n）。
+# KPM 不启用；SUSFS 由后续 integrate_susfs.sh 按 enable_susfs 开关追加。
 CONFIG_KSU=y
 CONFIG_KSU_FEATURE_ADBROOT=y
 # CONFIG_KSU_SUSFS is not set

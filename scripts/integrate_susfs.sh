@@ -26,6 +26,14 @@ COMMON="${ROOT}/common"
 SUSFS_BRANCH="gki-android15-6.6"
 SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
 
+# 可选手动开关：ENABLE_SUSFS=false 时整段跳过（不打补丁、不写 fragment）。
+# 默认开启。由 workflow_dispatch 的 enable_susfs boolean 输入透传。
+ENABLE_SUSFS="${ENABLE_SUSFS:-true}"
+if [ "$ENABLE_SUSFS" != "true" ]; then
+  echo "==> SUSFS 已禁用（ENABLE_SUSFS=$ENABLE_SUSFS），跳过集成，保持内核不含 SUSFS"
+  exit 0
+fi
+
 echo "==> KERNEL_PLATFORM = $ROOT"
 echo "==> SUSFS 分支 = $SUSFS_BRANCH"
 test -d "$COMMON" || { echo "::error::找不到 common/ ($COMMON)"; exit 1; }
