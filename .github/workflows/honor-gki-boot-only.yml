@@ -233,6 +233,12 @@ jobs:
           echo '==== ksu_defconfig fragment 内容 ===='
           cat "${KERNEL_PLATFORM}/common/ksu_defconfig"
 
+      - name: 集成 SUSFS（susfs4ksu gki-android15-6.6，官方流程）
+        run: |
+          set -uo pipefail
+          chmod +x scripts/integrate_susfs.sh
+          ./scripts/integrate_susfs.sh "${KERNEL_PLATFORM}"
+
       - name: 编译 GKI 内核（Kleaf，只编需要的 target）
         run: |
           set -uo pipefail
