@@ -1,0 +1,314 @@
+name: 荣耀GKI boot-only 构建 (android15-6.6)
+
+# 目标：用荣耀开源 common（android15-6.6）编出【一个 boot.img】，内核内置 SukiSU-Nova（KSU）。
+#   - 只产出 boot.img 一个产物（fastboot flash boot 刷入），不打包 AnyKernel3、不产 system_dlkm、不产单独 Image。
+#   - root 管理器（SukiSU-Nova）内置在内核里，随 boot 一起，刷完即有 root。
+#   - 不碰 recovery（独立 A/B 分区，且无其源码）、不碰 init_boot、不碰 ramdisk。
+#
+# 构建预算约束（重要）：Kleaf 全量 GKI 在 2 核 runner 约 40+ 分钟。
+#   → 不要为看排版/试流程反复触发；只在真正要出成品时跑。
+#
+# 现实边界：自编译 GKI 未用 Google 私钥签名，且公开源码 6.6.56 ≠ 真机 6.6.89，
+#   AVB/vermagic 与真机固件不匹配时刷入也开不了机；本分支只是产出「形态正确、可直接 fastboot flash」
+#   的分区镜像，供解锁后/固件对齐后使用。
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: 'Honor 型号代号（= 源码包文件名前缀）'
+        required: true
+        default: 'AAK-AN00'
+      sync_linux_security:
+        description: '同步 Linux 内核上游 6.6.y stable 安全补丁（拉到最新稳定版；冲突跳过并记录，仅静态编译验证）'
+        required: false
+        default: false
+        type: boolean
+      manager:
+        description: '内置管理器（当前仅 SukiSU-Nova，其他管理器暂不支持）'
+        required: false
+        default: 'sukisu_nova'
+        type: choice
+        options:
+          - sukisu_nova
+
+concurrency:
+  group: honor-gki-boot-only
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  MODEL: ${{ github.event.inputs.model || 'AAK-AN00' }}
+  BRANCH: common-android15-6.6
+  SYNC_LINUX_SECURITY: ${{ github.event.inputs.sync_linux_security || 'false' }}
+  MANAGER: ${{ github.event.inputs.manager || 'sukisu_nova' }}
+  KP_DIR: ${{ github.workspace }}/kp
+
+jobs:
+  build:
+    name: 荣耀GKI boot.img
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘空间
+        run: |
+          set -euxo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+                      /usr/lib/jvm /usr/local/.ghcup || true
+          sudo apt-get clean
+          df -h /
+
+      - name: 安装构建依赖
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            git-core gnupg flex bison build-essential zip unzip curl zlib1g-dev \
+            libc6-dev libncurses-dev libssl-dev libelf-dev bc cpio rsync \
+            python3 python3-pip dwarves lz4 device-tree-compiler ccache \
+            file libarchive-tools libxml2-utils aria2
+
+      - name: 记录运行机指纹
+        run: |
+          set -uo pipefail
+          echo "nproc=$(nproc)"; grep -m1 'model name' /proc/cpuinfo || true
+          cat /sys/fs/cgroup/cpu.max 2>/dev/null || true; df -h / | tail -1
+
+      - name: 安装 repo 同步工具
+        run: |
+          set -euxo pipefail
+          mkdir -p ~/bin
+          curl -fsSL https://raw.githubusercontent.com/GerritCodeReview/git-repo/main/repo -o ~/bin/repo
+          chmod +x ~/bin/repo
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: 拉取荣耀开源代码 (${{ env.MODEL }})
+        run: |
+          set -euxo pipefail
+          chmod +x scripts/fetch_honor_source.sh
+          ./scripts/fetch_honor_source.sh "${MODEL}" "${GITHUB_WORKSPACE}/honor_src"
+          du -sh "${GITHUB_WORKSPACE}/honor_src/Code_Opensource" || true
+
+      - name: 同步 AOSP 内核基础工程 (${{ env.BRANCH }})
+        run: |
+          set -euxo pipefail
+          mkdir -p "$KP_DIR"; cd "$KP_DIR"
+          git config --global user.name  "github-actions"
+          git config --global user.email "github-actions@github.com"
+          repo init -u https://android.googlesource.com/kernel/manifest -b "$BRANCH" --depth=1 --no-repo-verify
+          repo sync -c --no-tags --optimized-fetch -j"$(nproc)" --force-sync
+          if [ -d "$KP_DIR/kernel_platform/common" ]; then ROOT="$KP_DIR/kernel_platform"; else ROOT="$KP_DIR"; fi
+          echo "KERNEL_PLATFORM=$ROOT" >> "$GITHUB_ENV"
+          echo "识别到内核工程根目录: $ROOT"
+          test -d "$ROOT/common" || { echo "::error::找不到 $ROOT/common"; exit 1; }
+          du -sh "$KP_DIR"; df -h /
+
+      - name: 用荣耀源码覆盖 common 内核目录
+        run: |
+          set -euxo pipefail
+          SRC="${GITHUB_WORKSPACE}/honor_src/Code_Opensource"
+          test -d "${SRC}/kernel" || { echo "::error::找不到荣耀 kernel 目录"; exit 1; }
+          test -d "${KERNEL_PLATFORM}/common" || { echo "::error::common 不存在"; exit 1; }
+          rsync -a --delete --exclude='.git' "${SRC}/kernel/" "${KERNEL_PLATFORM}/common/"
+          miss=0
+          for f in Makefile Kbuild BUILD.bazel build.config.gki.aarch64 arch/arm64/configs/gki_defconfig; do
+            [ -e "${KERNEL_PLATFORM}/common/$f" ] && echo "  ✓ $f" || { echo "  ✗ $f"; miss=1; }
+          done
+          [ "$miss" -eq 0 ] || { echo "::error::覆盖后 common/ 缺关键文件"; exit 1; }
+
+      - name: 同步 Linux 内核上游安全补丁（6.6.y stable → 最新）
+        if: env.SYNC_LINUX_SECURITY == 'true'
+        run: |
+          set -uo pipefail
+          cd "${KERNEL_PLATFORM}/common"
+          # 基础版本号从 Makefile 读（荣耀源码 6.6.56）
+          BASE_MAJOR=$(sed -n 's/^VERSION = //p' Makefile | tr -d ' ')
+          BASE_PATCH=$(sed -n 's/^PATCHLEVEL = //p' Makefile | tr -d ' ')
+          BASE_SUB=$(sed -n 's/^SUBLEVEL = //p' Makefile | tr -d ' ')
+          BASE="${BASE_MAJOR}.${BASE_PATCH}.${BASE_SUB}"
+          echo "基础版本: $BASE"
+          # 动态拿 6.6.y 最新稳定版（kernel.org releases.json，不硬编码）
+          LATEST=$(curl -fsSL 'https://www.kernel.org/releases.json' \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); \
+                vs=[r['version'] for r in d.get('releases',[]) \
+                    if r['version'].startswith('${BASE_MAJOR}.${BASE_PATCH}.')]; \
+                print(sorted(vs, key=lambda v:[int(x) for x in v.split('.')[2:]], reverse=True)[0])" 2>/dev/null)
+          if [ -z "$LATEST" ]; then
+            echo "::error::无法从 kernel.org 获取最新 ${BASE_MAJOR}.${BASE_PATCH}.y 版本"; exit 1;
+          fi
+          echo "最新 6.6.y stable: $LATEST"
+          CUR="${BASE_MAJOR}.${BASE_PATCH}.${BASE_SUB}"
+          if [ "$CUR" = "$LATEST" ]; then
+            echo "==> 当前已是最新，无需打补丁"; exit 0;
+          fi
+          # 逐级打 incr 补丁：cur -> cur+1 -> ... -> latest
+          TMPD="${GITHUB_WORKSPACE}/stable-patches"; mkdir -p "$TMPD"
+          applied=0; rejected=0; total_hunks=0
+          while [ "$CUR" != "$LATEST" ]; do
+            CUR_MAJOR=$(echo "$CUR" | cut -d. -f1)
+            CUR_MINOR=$(echo "$CUR" | cut -d. -f2)
+            CUR_SUB=$(echo "$CUR" | cut -d. -f3)
+            NEXT_SUB=$((CUR_SUB + 1))
+            NEXT="${CUR_MAJOR}.${CUR_MINOR}.${NEXT_SUB}"
+            PATCH_URL="https://cdn.kernel.org/pub/linux/kernel/v${CUR_MAJOR}.x/incr/patch-${CUR}-${NEXT_SUB}.xz"
+            PATCH_XZ="$TMPD/patch-${CUR}-${NEXT_SUB}.xz"
+            PATCH="$TMPD/patch-${CUR}-${NEXT_SUB}"
+            echo "---- ${CUR} -> ${NEXT} ----"
+            if ! curl -fsSL -o "$PATCH_XZ" "$PATCH_URL"; then
+              echo "  ⚠ 补丁 ${PATCH_URL} 下载失败，跳过并终止打补丁"
+              break
+            fi
+            xz -dkf "$PATCH_XZ"
+            # 注意：不能用 --reject（GNU patch 无此长选项，会被判「选项歧义」退出码 2，
+            # 导致 patch 空转、一个 hunk 都没打）。用 -f（force：失败 hunk 生成 .rej 并继续）
+            # + --forward（忽略 reversed/already-applied）。-f 本身就会产出 .rej 文件。
+            if patch -p1 -f --forward < "$PATCH" > "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>&1; then
+              echo "  ✓ 干净应用（无失败 hunk）"
+            else
+              echo "  ⚠ 有冲突（-f 已生成 .rej 并跳过失败 hunk）"
+            fi
+            # 统计本次冲突
+            n_rej=$(find . -name '*.rej' -newer "$PATCH" 2>/dev/null | wc -l | tr -d ' ')
+            n_fail=$(grep -c 'FAILED' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
+            n_succ=$(grep -c 'succeeded' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
+            n_patch=$(grep -c 'patching file' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
+            echo "    patching_file=$n_patch succeeded=$n_succ FAILED=$n_fail .rej=$n_rej"
+            # 空转门禁：真正处理补丁时 patch 一定输出「patching file xxx」（或 dry-run 的
+            # 「checking file」）。若一条都没有，说明 patch 根本没碰到任何文件（选项错误、
+            # 补丁格式问题等），此时绝不能硬改 SUBLEVEL 制造「已同步」假象。
+            # 注意：不能用 succeeded/FAILED 计数判断——「干净应用」（无 offset）时两者都是 0，
+            # 但 patch 明明在工作（会输出 patching file），之前用这个判据误杀了干净补丁。
+            if [ "$n_patch" -eq 0 ]; then
+              echo "::error::补丁 ${CUR}->${NEXT} 空转（0 个文件被处理），patch 未生效，终止打补丁"
+              tail -20 "$TMPD/apply-${CUR}-${NEXT_SUB}.log"
+              exit 1
+            fi
+            rejected=$((rejected + n_fail))
+            applied=$((applied + 1))
+            # 更新版本号：SUBLEVEL 提到 NEXT_SUB（仅在补丁确实有 hunk 命中后）
+            sed -i "s/^SUBLEVEL = .*/SUBLEVEL = ${NEXT_SUB}/" Makefile
+            CUR="$NEXT"
+          done
+          echo "======================================"
+          echo "打补丁完成: 应用 $applied 个版本，累计 FAILED hunk $rejected 个"
+          echo "当前 Makefile 版本:"
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) ' Makefile
+          REJFILES=$(find . -name '*.rej' 2>/dev/null | wc -l | tr -d ' ')
+          echo ".rej 冲突文件总数: $REJFILES"
+          {
+            echo '### Linux 安全补丁同步结果'
+            echo "- 基础版本: $BASE  →  目标: $LATEST"
+            echo "- 应用补丁版本数: $applied"
+            echo "- 累计 FAILED hunk: $rejected"
+            echo "- .rej 文件数: $REJFILES"
+            echo '- 说明: 冲突已 -f 生成 .rej 并跳过失败 hunk，仅做静态编译验证；能否刷入真机不保证'
+            echo '```'
+            find . -name '*.rej' 2>/dev/null | head -50
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 集成 SukiSU-Nova（builtin-new，CONFIG_KSU=y 内置）
+        run: |
+          set -euxo pipefail
+          chmod +x scripts/integrate_sukisu.sh
+          ./scripts/integrate_sukisu.sh "${KERNEL_PLATFORM}" "${MANAGER}"
+          # 关键验证：软链 / fragment / BUILD.bazel 注入 是否就位
+          test -f "${KERNEL_PLATFORM}/common/drivers/kernelsu/Kconfig" || exit 1
+          test -f "${KERNEL_PLATFORM}/common/drivers/kernelsu/Makefile" || exit 1
+          # fragment 方案：CONFIG_KSU=y 在 ksu_defconfig fragment 里，gki_defconfig 本体必须干净
+          test -f "${KERNEL_PLATFORM}/common/ksu_defconfig" || { echo "::error::缺 ksu_defconfig"; exit 1; }
+          grep -q '^CONFIG_KSU=y' "${KERNEL_PLATFORM}/common/ksu_defconfig" || { echo "::error::fragment 缺 CONFIG_KSU=y"; exit 1; }
+          if grep -q '^CONFIG_KSU=' "${KERNEL_PLATFORM}/common/arch/arm64/configs/gki_defconfig"; then
+            echo "::error::gki_defconfig 被污染（含 CONFIG_KSU），Kleaf minimized 校验必失败"; exit 1;
+          fi
+          grep -q '"defconfig_fragments": \["ksu_defconfig"\]' "${KERNEL_PLATFORM}/common/BUILD.bazel" \
+            || { echo "::error::BUILD.bazel 未注入 defconfig_fragments"; exit 1; }
+          echo '==== ksu_defconfig fragment 内容 ===='
+          cat "${KERNEL_PLATFORM}/common/ksu_defconfig"
+
+      - name: 编译 GKI 内核（Kleaf，只编需要的 target）
+        run: |
+          set -uo pipefail
+          cd "$KERNEL_PLATFORM"
+          LOG="$GITHUB_WORKSPACE/build.log"
+          ls -l tools/bazel || { echo "::error::缺少 tools/bazel"; exit 1; }
+          T0=$(date +%s)
+          # 只建一个 target：kernel_aarch64_gki_artifacts -> boot.img（含内置 KSU 的内核）
+          # 不建 kernel_aarch64（单独 Image）、不建 kernel_aarch64_images（system_dlkm）、不建 dist
+          tools/bazel build --config=fast \
+            //common:kernel_aarch64_gki_artifacts >>"$LOG" 2>&1 || {
+            echo "::error::GKI 编译失败"
+            { echo "### ❌ GKI 编译失败"; echo '```'
+              grep -inE 'error|FAILED|fatal|Exception' "$LOG" | head -40; echo '```'
+              echo '#### 末尾 60 行'; echo '```'; tail -60 "$LOG"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            exit 1; }
+          T1=$(date +%s); echo "编译耗时 $((T1-T0))s"
+          tail -15 "$LOG"
+
+      - name: 取出产物（仅 boot.img）
+        run: |
+          set -uo pipefail
+          cd "$KERNEL_PLATFORM"
+          D="$GITHUB_WORKSPACE/dist"; mkdir -p "$D"
+          EXEC=$(tools/bazel info execution_root 2>/dev/null)
+          echo "execroot=$EXEC"
+          BOOT=$(find "$EXEC" -maxdepth 9 -type f -name 'boot.img' -path '*kernel_aarch64*' 2>/dev/null | head -1)
+          [ -n "$BOOT" ] && [ -f "$BOOT" ] || { echo "::error::没有产出 boot.img"; exit 1; }
+          cp -v "$BOOT" "$D/boot.img"
+          # boot.img 头部 magic 必须是 ANDROID!（偏移 0，8 字节）
+          MAGIC=$(od -An -c -j 0 -N 8 "$D/boot.img" 2>/dev/null | tr -d ' \n')
+          echo "boot.img magic = $MAGIC"
+          [ "$MAGIC" = "ANDROID!" ] || { echo "::error::boot.img 头 magic 不是 ANDROID!，产物不对"; exit 1; }
+          # ===== KSU 编入门禁（确定性断言，缺任一项即失败，绝不让没编进 KSU 的包流出）=====
+          # 用 strings 查三个铁证串：它们只会在 SukiSU-Nova 源码被实际编译进内核后出现。
+          #   1) welcome to KernelSU version   —— KSU 初始化欢迎串
+          #   2) 当前 manager 的包名           —— 管理器包名（动态，随 manager 选项）
+          #   3) version 30007                 —— KSU 版本号（对应 builtin-new 的 v3.0.0）
+          case "$MANAGER" in
+            sukisu_nova) KSU_PKG_NAME="com.sukisu.nova" ;;
+            *) echo "::error::未知 manager=$MANAGER，门禁无法确定包名"; exit 1;;
+          esac
+          STRINGS_TMP="$D/boot.strings"
+          strings -a "$D/boot.img" > "$STRINGS_TMP"
+          ksu_ok=0
+          for needle in 'welcome to KernelSU version' "$KSU_PKG_NAME" 'version 30007'; do
+            if grep -qF "$needle" "$STRINGS_TMP"; then
+              echo "  ✓ KSU 铁证命中: $needle"
+            else
+              echo "  ✗ KSU 铁证缺失: $needle"
+              ksu_ok=1
+            fi
+          done
+          rm -f "$STRINGS_TMP"
+          if [ "$ksu_ok" -ne 0 ]; then
+            echo "::error::boot.img 里没有检测到 SukiSU-Nova 已编入（上述铁证串缺失），拒绝产出"
+            exit 1
+          fi
+          echo "  ✅ KSU 门禁通过：SukiSU-Nova 已确认编入 boot.img（manager=$MANAGER）"
+          INFO=$(find "$EXEC" -maxdepth 9 -type f -name 'gki-info.txt' -path '*kernel_aarch64*' 2>/dev/null | head -1)
+          if [ -n "$INFO" ]; then echo '==== gki-info.txt ===='; cat "$INFO"; fi
+          ls -la "$D"
+
+      - name: 上传 boot.img
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AAK-AN00-GKI-boot
+          path: |
+            dist/boot.img
+          if-no-files-found: error
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 编译日志
+          path: build.log
+          if-no-files-found: warn
