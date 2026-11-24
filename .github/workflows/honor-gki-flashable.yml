@@ -19,6 +19,11 @@ on:
         description: 'Honor 型号代号（= 源码包文件名前缀）'
         required: true
         default: 'AAK-AN00'
+      sync_linux_security:
+        description: '同步 Linux 内核上游 6.6.y stable 安全补丁（拉到最新稳定版；冲突跳过并记录，仅静态编译验证）'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: honor-gki-flashable
@@ -30,6 +35,7 @@ permissions:
 env:
   MODEL: ${{ github.event.inputs.model || 'AAK-AN00' }}
   BRANCH: common-android15-6.6
+  SYNC_LINUX_SECURITY: ${{ github.event.inputs.sync_linux_security || 'false' }}
   KP_DIR: ${{ github.workspace }}/kp
 
 jobs:
@@ -108,6 +114,84 @@ jobs:
             [ -e "${KERNEL_PLATFORM}/common/$f" ] && echo "  ✓ $f" || { echo "  ✗ $f"; miss=1; }
           done
           [ "$miss" -eq 0 ] || { echo "::error::覆盖后 common/ 缺关键文件"; exit 1; }
+
+      - name: 同步 Linux 内核上游安全补丁（6.6.y stable → 最新）
+        if: env.SYNC_LINUX_SECURITY == 'true'
+        run: |
+          set -uo pipefail
+          cd "${KERNEL_PLATFORM}/common"
+          # 基础版本号从 Makefile 读（荣耀源码 6.6.56）
+          BASE_MAJOR=$(sed -n 's/^VERSION = //p' Makefile | tr -d ' ')
+          BASE_PATCH=$(sed -n 's/^PATCHLEVEL = //p' Makefile | tr -d ' ')
+          BASE_SUB=$(sed -n 's/^SUBLEVEL = //p' Makefile | tr -d ' ')
+          BASE="${BASE_MAJOR}.${BASE_PATCH}.${BASE_SUB}"
+          echo "基础版本: $BASE"
+          # 动态拿 6.6.y 最新稳定版（kernel.org releases.json，不硬编码）
+          LATEST=$(curl -fsSL 'https://www.kernel.org/releases.json' \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); \
+                vs=[r['version'] for r in d.get('releases',[]) \
+                    if r['version'].startswith('${BASE_MAJOR}.${BASE_PATCH}.')]; \
+                print(sorted(vs, key=lambda v:[int(x) for x in v.split('.')[2:]], reverse=True)[0])" 2>/dev/null)
+          if [ -z "$LATEST" ]; then
+            echo "::error::无法从 kernel.org 获取最新 ${BASE_MAJOR}.${BASE_PATCH}.y 版本"; exit 1;
+          fi
+          echo "最新 6.6.y stable: $LATEST"
+          CUR="${BASE_MAJOR}.${BASE_PATCH}.${BASE_SUB}"
+          if [ "$CUR" = "$LATEST" ]; then
+            echo "==> 当前已是最新，无需打补丁"; exit 0;
+          fi
+          # 逐级打 incr 补丁：cur -> cur+1 -> ... -> latest
+          TMPD="${GITHUB_WORKSPACE}/stable-patches"; mkdir -p "$TMPD"
+          applied=0; rejected=0; total_hunks=0
+          while [ "$CUR" != "$LATEST" ]; do
+            CUR_MAJOR=$(echo "$CUR" | cut -d. -f1)
+            CUR_MINOR=$(echo "$CUR" | cut -d. -f2)
+            CUR_SUB=$(echo "$CUR" | cut -d. -f3)
+            NEXT_SUB=$((CUR_SUB + 1))
+            NEXT="${CUR_MAJOR}.${CUR_MINOR}.${NEXT_SUB}"
+            PATCH_URL="https://cdn.kernel.org/pub/linux/kernel/v${CUR_MAJOR}.x/incr/patch-${CUR}-${NEXT_SUB}.xz"
+            PATCH_XZ="$TMPD/patch-${CUR}-${NEXT_SUB}.xz"
+            PATCH="$TMPD/patch-${CUR}-${NEXT_SUB}"
+            echo "---- ${CUR} -> ${NEXT} ----"
+            if ! curl -fsSL -o "$PATCH_XZ" "$PATCH_URL"; then
+              echo "  ⚠ 补丁 ${PATCH_URL} 下载失败，跳过并终止打补丁"
+              break
+            fi
+            xz -dkf "$PATCH_XZ"
+            # -f 强制（遇到 fail 继续），--reject 生成 .rej，不 fatal
+            if patch -p1 -f --reject --forward < "$PATCH" > "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>&1; then
+              echo "  ✓ 干净应用"
+            else
+              echo "  ⚠ 有冲突（已 --reject 跳过）"
+            fi
+            # 统计本次冲突
+            n_rej=$(find . -name '*.rej' -newer "$PATCH" 2>/dev/null | wc -l | tr -d ' ')
+            n_fail=$(grep -c 'FAILED' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
+            n_succ=$(grep -c 'succeeded' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
+            echo "    succeeded=$n_succ FAILED=$n_fail .rej=$n_rej"
+            rejected=$((rejected + n_fail))
+            applied=$((applied + 1))
+            # 更新版本号：SUBLEVEL 提到 NEXT_SUB
+            sed -i "s/^SUBLEVEL = .*/SUBLEVEL = ${NEXT_SUB}/" Makefile
+            CUR="$NEXT"
+          done
+          echo "======================================"
+          echo "打补丁完成: 应用 $applied 个版本，累计 FAILED hunk $rejected 个"
+          echo "当前 Makefile 版本:"
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION) ' Makefile
+          REJFILES=$(find . -name '*.rej' 2>/dev/null | wc -l | tr -d ' ')
+          echo ".rej 冲突文件总数: $REJFILES"
+          {
+            echo '### Linux 安全补丁同步结果'
+            echo "- 基础版本: $BASE  →  目标: $LATEST"
+            echo "- 应用补丁版本数: $applied"
+            echo "- 累计 FAILED hunk: $rejected"
+            echo "- .rej 文件数: $REJFILES"
+            echo '- 说明: 冲突已 --reject 跳过，仅做静态编译验证；能否刷入真机不保证'
+            echo '```'
+            find . -name '*.rej' 2>/dev/null | head -50
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 集成 SukiSU-Nova（builtin-new，CONFIG_KSU=y 内置）
         run: |
