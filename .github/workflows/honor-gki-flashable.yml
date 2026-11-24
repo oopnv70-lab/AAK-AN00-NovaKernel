@@ -189,6 +189,28 @@ jobs:
           echo "Image magic@0x38 = $MAGIC"
           [ "$MAGIC" = "644d5241" ] || { echo "::error::Image 头 magic 不是 644d5241，产物不对"; exit 1; }
           strings -a "$D/Image" 2>/dev/null | grep -m1 '^Linux version' || echo "::warning::Image 里没找到 Linux version 串"
+          # ===== KSU 编入门禁（确定性断言，缺任一项即失败，绝不让没编进 KSU 的包流出）=====
+          # 用 strings 查三个铁证串：它们只会在 SukiSU-Nova 源码被实际编译进内核后出现。
+          #   1) welcome to KernelSU version   —— KSU 初始化欢迎串
+          #   2) com.sukisu.nova               —— 管理器包名（Nova，区别于旧版 Ultra）
+          #   3) version 30007                 —— KSU 版本号（对应 builtin-new 的 v3.0.0）
+          STRINGS_TMP="$D/Image.strings"
+          strings -a "$D/Image" > "$STRINGS_TMP"
+          ksu_ok=0
+          for needle in 'welcome to KernelSU version' 'com.sukisu.nova' 'version 30007'; do
+            if grep -qF "$needle" "$STRINGS_TMP"; then
+              echo "  ✓ KSU 铁证命中: $needle"
+            else
+              echo "  ✗ KSU 铁证缺失: $needle"
+              ksu_ok=1
+            fi
+          done
+          rm -f "$STRINGS_TMP"
+          if [ "$ksu_ok" -ne 0 ]; then
+            echo "::error::Image 里没有检测到 SukiSU-Nova 已编入（上述铁证串缺失），拒绝继续打包"
+            exit 1
+          fi
+          echo "  ✅ KSU 门禁通过：SukiSU-Nova 已确认编入 Image"
           INFO=$(find "$EXEC" -maxdepth 9 -type f -name 'gki-info.txt' -path '*kernel_aarch64*' 2>/dev/null | head -1)
           if [ -n "$INFO" ]; then echo '==== gki-info.txt ===='; cat "$INFO"; fi
           ls -la "$D"
