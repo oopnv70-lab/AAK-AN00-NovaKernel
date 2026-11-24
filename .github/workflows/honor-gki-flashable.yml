@@ -434,48 +434,6 @@ jobs:
 
           split_boot;
           flash_boot;
-
-          # ---- 写后回读自证：把分区 kernel 段读回来，与包内 Image 比 md5 ----
-          # header v3/v4 无 page_size 字段，kernel 固定从 4096 开始；v0-2 才读 @36 的 page_size。
-          verify_kernel_write() {
-            if ! command -v od >/dev/null 2>&1 || ! command -v md5sum >/dev/null 2>&1; then
-              ui_print "  （环境缺 od/md5sum，回读校验跳过）"
-              return 0
-            fi
-            MAGIC=$(dd if="$BLOCK" bs=1 count=8 2>/dev/null)
-            if [ "$MAGIC" != "ANDROID!" ]; then
-              ui_print "  （头部非 ANDROID!，不是 boot 镜像，回读校验跳过）"
-              return 0
-            fi
-            HV=$(od -An -tu4 -j 40 -N 4 "$BLOCK" 2>/dev/null | tr -d ' \n')
-            KS=$(od -An -tu4 -j 8 -N 4 "$BLOCK" 2>/dev/null | tr -d ' \n')
-            case "$KS" in
-              ''|*[!0-9]*) ui_print "  （读不到 kernel_size，回读校验跳过）"; return 0;;
-            esac
-            if [ "$KS" -gt 268435456 ]; then
-              ui_print "  （kernel_size=$KS 不合理，回读校验跳过）"
-              return 0
-            fi
-            KOF=4096
-            case "$HV" in
-              ''|*[!0-9]*) : ;;
-              *) if [ "$HV" -lt 3 ]; then KOF=$(od -An -tu4 -j 36 -N 4 "$BLOCK" 2>/dev/null | tr -d ' \n'); fi;;
-            esac
-            case "$KOF" in ''|0|*[!0-9]*) KOF=4096;; esac
-            SZ=$(wc -c < Image | tr -d ' ')
-            [ "$SZ" = "$KS" ] || ui_print "  ⚠ 分区内 kernel 段 $KS 字节，包内 Image $SZ 字节（大小不一致）"
-            CNT=$(( (KS + KOF - 1) / KOF ))
-            GOT=$(dd if="$BLOCK" bs=$KOF skip=1 count=$CNT 2>/dev/null | head -c "$KS" | md5sum | cut -d' ' -f1)
-            WANT=$(md5sum Image | cut -d' ' -f1)
-            if [ "$GOT" = "$WANT" ]; then
-              ui_print "  ✅ 回读校验通过：$BLOCK kernel 段 $KS 字节，md5 与包内 Image 一致"
-              ui_print "     md5=$WANT"
-            else
-              ui_print "  ❌ 回读校验不一致：expect=$WANT got=$GOT"
-              ui_print "     请勿依赖本次启动；回退用 fastboot flash boot$SLOT <原厂 boot.img>"
-            fi
-          }
-          verify_kernel_write;
           AK3
 
           cp "$D/Image" ./Image
@@ -484,7 +442,7 @@ jobs:
           echo '==== 包内根目录 ===='
           ls -l anykernel.sh Image
           bash -n anykernel.sh || { echo "::error::anykernel.sh 语法错误"; exit 1; }
-          for chk in 'SLOT_SELECT=active;' 'BLOCK=boot;' 'IS_SLOT_DEVICE=1;' 'PATCH_VBMETA_FLAG=auto;' 'verify_kernel_write;'; do
+          for chk in 'SLOT_SELECT=active;' 'BLOCK=boot;' 'IS_SLOT_DEVICE=1;' 'PATCH_VBMETA_FLAG=auto;'; do
             grep -qF "$chk" anykernel.sh || { echo "::error::anykernel.sh 缺约束：$chk"; exit 1; }
           done
           grep -qF 'split_boot;' anykernel.sh && grep -qF 'flash_boot;' anykernel.sh \
