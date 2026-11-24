@@ -62,7 +62,10 @@ if [ "$n_rej" -gt 0 ]; then
   echo "    不自动修复，保留 .rej，后续编译会自然失败。"
   find . -name '*.rej' 2>/dev/null | head -20
 fi
-tail -20 /tmp/susfs-main-apply.log
+# 完整展示 patch 结果（不 tail 截断）：把每个文件的 hunk 成功/失败明细都暴露，
+# 避免 base.c 这种多 hunk 文件的后续 hunk 结果被吞掉（此前 tail -20 的盲区）。
+echo "==> 完整 patch 结果（hunk 明细） =="
+cat /tmp/susfs-main-apply.log
 
 # ============ 2.5) 补齐已知 .rej 的 susfs_def.h include（荣耀 6.6 树专属） ============
 # 背景（本地源码树 grep 坐实，非类推）：
