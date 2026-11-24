@@ -1,6 +1,6 @@
 # NOTICE
 
-本仓库（`oopnv70-lab/honor-system`）是荣耀 WIN RT（AAK-AN00）GKI 内核的第三方构建工程。
+本仓库（`oopnv70-lab/AAK-AN00-NovaKernel`）是荣耀 WIN RT（AAK-AN00）GKI 内核的第三方构建工程。
 仓库根目录 `LICENSE` 为 **GNU General Public License v2.0（GPL-2.0）**，适用于本仓库的自有代码
 与内核衍生部分。以下第三方组件分别适用其各自的许可证，特此逐项声明。
 

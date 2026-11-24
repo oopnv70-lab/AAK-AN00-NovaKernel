@@ -1,4 +1,4 @@
-# honor-system — 荣耀 WIN RT（AAK-AN00）GKI 内核构建工程
+# AAK-AN00-NovaKernel — 荣耀 WIN RT（AAK-AN00）GKI 内核构建工程
 
 > 设备：荣耀 WIN RT（AAK-AN00）｜ 系统：MagicOS 10.0（Android 15）｜ 内核：Linux 6.6.56（android15-6.6）
 > 自编译 GKI 内核 + 内置 SukiSU-Nova（builtin-new 分支，CONFIG_KSU=y）+ AnyKernel3 刷机包。
