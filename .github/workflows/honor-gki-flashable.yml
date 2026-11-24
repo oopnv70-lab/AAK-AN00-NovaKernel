@@ -165,20 +165,29 @@ jobs:
               break
             fi
             xz -dkf "$PATCH_XZ"
-            # -f 强制（遇到 fail 继续），--reject 生成 .rej，不 fatal
-            if patch -p1 -f --reject --forward < "$PATCH" > "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>&1; then
-              echo "  ✓ 干净应用"
+            # 注意：不能用 --reject（GNU patch 无此长选项，会被判「选项歧义」退出码 2，
+            # 导致 patch 空转、一个 hunk 都没打）。用 -f（force：失败 hunk 生成 .rej 并继续）
+            # + --forward（忽略 reversed/already-applied）。-f 本身就会产出 .rej 文件。
+            if patch -p1 -f --forward < "$PATCH" > "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>&1; then
+              echo "  ✓ 干净应用（无失败 hunk）"
             else
-              echo "  ⚠ 有冲突（已 --reject 跳过）"
+              echo "  ⚠ 有冲突（-f 已生成 .rej 并跳过失败 hunk）"
             fi
             # 统计本次冲突
             n_rej=$(find . -name '*.rej' -newer "$PATCH" 2>/dev/null | wc -l | tr -d ' ')
             n_fail=$(grep -c 'FAILED' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
             n_succ=$(grep -c 'succeeded' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
             echo "    succeeded=$n_succ FAILED=$n_fail .rej=$n_rej"
+            # 空转门禁：succeeded 与 FAILED 全为 0 说明 patch 根本没处理任何 hunk
+            #（如选项错误、补丁格式问题），此时绝不能硬改 SUBLEVEL 制造「已同步」假象。
+            if [ "$n_succ" -eq 0 ] && [ "$n_fail" -eq 0 ]; then
+              echo "::error::补丁 ${CUR}->${NEXT} 空转（0 个 hunk 命中），patch 未生效，终止打补丁"
+              tail -20 "$TMPD/apply-${CUR}-${NEXT_SUB}.log"
+              exit 1
+            fi
             rejected=$((rejected + n_fail))
             applied=$((applied + 1))
-            # 更新版本号：SUBLEVEL 提到 NEXT_SUB
+            # 更新版本号：SUBLEVEL 提到 NEXT_SUB（仅在补丁确实有 hunk 命中后）
             sed -i "s/^SUBLEVEL = .*/SUBLEVEL = ${NEXT_SUB}/" Makefile
             CUR="$NEXT"
           done
@@ -194,7 +203,7 @@ jobs:
             echo "- 应用补丁版本数: $applied"
             echo "- 累计 FAILED hunk: $rejected"
             echo "- .rej 文件数: $REJFILES"
-            echo '- 说明: 冲突已 --reject 跳过，仅做静态编译验证；能否刷入真机不保证'
+            echo '- 说明: 冲突已 -f 生成 .rej 并跳过失败 hunk，仅做静态编译验证；能否刷入真机不保证'
             echo '```'
             find . -name '*.rej' 2>/dev/null | head -50
             echo '```'
