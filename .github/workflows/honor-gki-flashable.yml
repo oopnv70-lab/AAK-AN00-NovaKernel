@@ -109,6 +109,18 @@ jobs:
           done
           [ "$miss" -eq 0 ] || { echo "::error::覆盖后 common/ 缺关键文件"; exit 1; }
 
+      - name: 集成 SukiSU-Nova（builtin-new，CONFIG_KSU=y 内置）
+        run: |
+          set -euxo pipefail
+          chmod +x scripts/integrate_sukisu.sh
+          ./scripts/integrate_sukisu.sh "${KERNEL_PLATFORM}"
+          # 关键验证：软链与 config 是否就位
+          test -f "${KERNEL_PLATFORM}/common/drivers/kernelsu/Kconfig" || exit 1
+          test -f "${KERNEL_PLATFORM}/common/drivers/kernelsu/Makefile" || exit 1
+          grep -q '^CONFIG_KSU=y' "${KERNEL_PLATFORM}/common/arch/arm64/configs/gki_defconfig" || exit 1
+          echo '==== gki_defconfig 末尾（含 KSU 段）===='
+          tail -12 "${KERNEL_PLATFORM}/common/arch/arm64/configs/gki_defconfig"
+
       - name: 编译 GKI 内核（Kleaf，只编需要的 target）
         run: |
           set -uo pipefail
