@@ -72,7 +72,7 @@ jobs:
             git-core gnupg flex bison build-essential zip unzip curl zlib1g-dev \
             libc6-dev libncurses-dev libssl-dev libelf-dev bc cpio rsync \
             python3 python3-pip dwarves lz4 device-tree-compiler ccache \
-            file libarchive-tools libxml2-utils
+            file libarchive-tools libxml2-utils aria2
 
       - name: 记录运行机指纹
         run: |

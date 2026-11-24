@@ -67,10 +67,50 @@ done
 curl -s -A "$UA" -e "$REFERER" --max-time 30 "$REFERER" -c "$WORK/ck.txt" -o /dev/null || true
 
 ZIP="$DEST/${FN:-$MODEL.zip}"
-echo "[*] 下载源码包（带 Referer）-> $ZIP"
-curl -L -A "$UA" -e "$REFERER" -b "$WORK/ck.txt" --max-time 3600 \
-     --retry 3 --retry-delay 5 "$URL" -o "$ZIP" \
-     -w '[+] HTTP=%{http_code} size=%{size_download}B time=%{time_total}s\n'
+echo "[*] 下载源码包（多线程 aria2 + 单线程 curl 兜底）-> $ZIP"
+
+# 荣耀下载服务器单连接限速约 2 MB/s，用 aria2 多连接分段并发拉取提速。
+# 前提：服务器支持 Range（HTTP 206）。若不支持，aria2 只能拿到部分数据，
+# 通过「校验下载字节数 vs 期望大小」来判定，失败则回退单线程 curl。
+if command -v aria2c >/dev/null 2>&1; then
+  echo "[*] 尝试 aria2c 多线程下载（16 连接 / 16 分段）..."
+  T0=$(date +%s)
+  # --header 每连接都带 Referer；--auto-file-renaming=false 避免改名；-x/-s 控制并发与分段
+  aria2c -x 16 -s 16 \
+    --header="Referer: $REFERER" \
+    --header="User-Agent: $UA" \
+    --auto-file-renaming=false \
+    --allow-overwrite=true \
+    --continue=true \
+    --max-tries=3 --retry-wait=3 \
+    --summary-interval=30 \
+    "$URL" -d "$DEST" -o "$(basename "$ZIP")" 2>&1 | tail -20
+  rc=${PIPESTATUS[0]}
+  T1=$(date +%s)
+  GOT=$(stat -c %s "$ZIP" 2>/dev/null || echo 0)
+  echo "[+] aria2 结束 rc=$rc 耗时=$((T1-T0))s 下载=$GOT B"
+  # 期望大小：接口返回的 fileLen 单位是 KB（日志里 562995.2KB ≈ 576,463,534 B）
+  EXP=$(python3 -c "print(int(float('$SZ')*1000))" 2>/dev/null || echo 0)
+  # 校验：rc=0 且字节数接近期望（允许千分之几误差，fileLen 是 KB 精度）
+  if [ "$rc" -eq 0 ] && [ "$GOT" -gt 0 ] && { [ "$EXP" -eq 0 ] || [ "$GOT" -ge $((EXP * 99 / 100)) ]; }; then
+    echo "[+] aria2 多线程下载完成，大小 $GOT B，速度约 $((GOT / (T1-T0+1) / 1024)) KB/s"
+  else
+    echo "[!] aria2 下载不完整或失败（got=$GOT expect≈$EXP），回退单线程 curl"
+    rm -f "$ZIP"
+    curl -L -A "$UA" -e "$REFERER" -b "$WORK/ck.txt" --max-time 3600 \
+         --retry 3 --retry-delay 5 "$URL" -o "$ZIP" \
+         -w '[+] curl HTTP=%{http_code} size=%{size_download}B time=%{time_total}s\n'
+  fi
+else
+  echo "[*] 无 aria2c，单线程 curl 下载"
+  curl -L -A "$UA" -e "$REFERER" -b "$WORK/ck.txt" --max-time 3600 \
+       --retry 3 --retry-delay 5 "$URL" -o "$ZIP" \
+       -w '[+] curl HTTP=%{http_code} size=%{size_download}B time=%{time_total}s\n'
+fi
+
+# 最终兜底校验：下载产物必须非空且可解压，否则直接失败（不让空包往下走）
+test -s "$ZIP" || { echo "[x] 下载产物为空，下载失败"; exit 5; }
+echo "[+] 最终下载产物: $(stat -c %s "$ZIP") B"
 
 echo "[*] 解压外层 zip -> $DEST"
 unzip -q -o "$ZIP" -d "$DEST"
