@@ -300,10 +300,13 @@ jobs:
           [ "$MAGIC" = "644d5241" ] || { echo "::error::Image 头 magic 不是 644d5241，产物不对"; exit 1; }
           strings -a "$D/Image" 2>/dev/null | grep -m1 '^Linux version' || echo "::warning::Image 里没找到 Linux version 串"
           # ===== KSU 编入门禁（确定性断言，缺任一项即失败，绝不让没编进 KSU 的包流出）=====
-          # 用 strings 查三个铁证串：它们只会在 SukiSU-Nova 源码被实际编译进内核后出现。
+          # 用 strings 查两个铁证串：它们只会在 SukiSU-Nova 源码被实际编译进内核后出现。
           #   1) welcome to KernelSU version   —— KSU 初始化欢迎串
           #   2) 当前 manager 的包名           —— 管理器包名（动态，随 manager 选项）
-          #   3) version 30007                 —— KSU 版本号（对应 builtin-new 的 v3.0.0）
+          # 注意：不再用「version 30007」之类的版本号串当铁证。SukiSU-Nova 的 KSU_VERSION
+          #   是动态计算的（kernel/Makefile: VERSION_BASE=30000, VERSION_OFFSET=4001,
+          #   KSU_VERSION = 30000 + commit数 - 4001，无计数时 = 41000），不存在固定值，
+          #   写死任何数字都会误杀。前两个铁证（欢迎串 + 包名）已足以证明 SukiSU-Nova 编入。
           case "$MANAGER" in
             sukisu_nova) KSU_PKG_NAME="com.sukisu.nova" ;;
             *) echo "::error::未知 manager=$MANAGER，门禁无法确定包名"; exit 1;;
@@ -311,7 +314,7 @@ jobs:
           STRINGS_TMP="$D/Image.strings"
           strings -a "$D/Image" > "$STRINGS_TMP"
           ksu_ok=0
-          for needle in 'welcome to KernelSU version' "$KSU_PKG_NAME" 'version 30007'; do
+          for needle in 'welcome to KernelSU version' "$KSU_PKG_NAME"; do
             if grep -qF "$needle" "$STRINGS_TMP"; then
               echo "  ✓ KSU 铁证命中: $needle"
             else
