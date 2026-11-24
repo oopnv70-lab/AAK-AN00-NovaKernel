@@ -177,11 +177,15 @@ jobs:
             n_rej=$(find . -name '*.rej' -newer "$PATCH" 2>/dev/null | wc -l | tr -d ' ')
             n_fail=$(grep -c 'FAILED' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
             n_succ=$(grep -c 'succeeded' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
-            echo "    succeeded=$n_succ FAILED=$n_fail .rej=$n_rej"
-            # 空转门禁：succeeded 与 FAILED 全为 0 说明 patch 根本没处理任何 hunk
-            #（如选项错误、补丁格式问题），此时绝不能硬改 SUBLEVEL 制造「已同步」假象。
-            if [ "$n_succ" -eq 0 ] && [ "$n_fail" -eq 0 ]; then
-              echo "::error::补丁 ${CUR}->${NEXT} 空转（0 个 hunk 命中），patch 未生效，终止打补丁"
+            n_patch=$(grep -c 'patching file' "$TMPD/apply-${CUR}-${NEXT_SUB}.log" 2>/dev/null || true)
+            echo "    patching_file=$n_patch succeeded=$n_succ FAILED=$n_fail .rej=$n_rej"
+            # 空转门禁：真正处理补丁时 patch 一定输出「patching file xxx」（或 dry-run 的
+            # 「checking file」）。若一条都没有，说明 patch 根本没碰到任何文件（选项错误、
+            # 补丁格式问题等），此时绝不能硬改 SUBLEVEL 制造「已同步」假象。
+            # 注意：不能用 succeeded/FAILED 计数判断——「干净应用」（无 offset）时两者都是 0，
+            # 但 patch 明明在工作（会输出 patching file），之前用这个判据误杀了干净补丁。
+            if [ "$n_patch" -eq 0 ]; then
+              echo "::error::补丁 ${CUR}->${NEXT} 空转（0 个文件被处理），patch 未生效，终止打补丁"
               tail -20 "$TMPD/apply-${CUR}-${NEXT_SUB}.log"
               exit 1
             fi
