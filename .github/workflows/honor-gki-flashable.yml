@@ -6,7 +6,6 @@ name: 荣耀GKI AnyKernel3 刷机包 (android15-6.6)
 #
 # 构建预算约束（重要）：Kleaf 全量 GKI 在 2 核 runner 约 40+ 分钟。
 #   → 不要为看排版/试流程反复触发；只在真正要出成品时跑。
-#   → 日常「改动能不能编过」请用 make 出裸 Image（见主分支 workflow 的 make 路线）。
 #
 # 现实边界：自编译 GKI 未用 Google 私钥签名，且公开源码 6.6.56 ≠ 真机 6.6.89，
 #   AVB/vermagic 与真机固件不匹配时刷入也开不了机；本分支只是产出「形态正确、可直接 fastboot flash」
