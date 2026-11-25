@@ -24,12 +24,13 @@ on:
         default: false
         type: boolean
       manager:
-        description: '内置管理器（当前仅 SukiSU-Nova，其他管理器暂不支持）'
+        description: '内置管理器（sukisu_nova = 内置 root；none = 不内置 root，纯净 GKI，跳过 SukiSU/SUSFS/KPM）'
         required: false
         default: 'sukisu_nova'
         type: choice
         options:
           - sukisu_nova
+          - none
       enable_susfs:
         description: '是否集成 SUSFS（路径隐藏/重定向/maps 欺骗等；默认开启）'
         required: false
@@ -232,6 +233,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 集成 SukiSU-Nova（builtin-new，CONFIG_KSU=y 内置）
+        if: env.MANAGER != 'none'
         run: |
           set -euxo pipefail
           chmod +x scripts/integrate_sukisu.sh
@@ -251,6 +253,7 @@ jobs:
           cat "${KERNEL_PLATFORM}/common/ksu_defconfig"
 
       - name: 集成 SUSFS（susfs4ksu gki-android15-6.6，官方流程）
+        if: env.MANAGER != 'none'
         run: |
           set -uo pipefail
           chmod +x scripts/integrate_susfs.sh
@@ -348,6 +351,9 @@ jobs:
           [ "$MAGIC" = "644d5241" ] || { echo "::error::Image 头 magic 不是 644d5241，产物不对"; exit 1; }
           strings -a "$D/Image" 2>/dev/null | grep -m1 '^Linux version' || echo "::warning::Image 里没找到 Linux version 串"
           # ===== KSU 编入门禁（确定性断言，缺任一项即失败，绝不让没编进 KSU 的包流出）=====
+          # 仅当 manager != none（即内置了 SukiSU-Nova）时才做此门禁。
+          # manager=none 表示「不内置 root 的纯净 GKI」，本就不该出现 KSU 铁证串。
+          if [ "$MANAGER" != "none" ]; then
           # 用 strings 查两个铁证串：它们只会在 SukiSU-Nova 源码被实际编译进内核后出现。
           #   1) welcome to KernelSU version   —— KSU 初始化欢迎串
           #   2) 当前 manager 的包名           —— 管理器包名（动态，随 manager 选项）
@@ -376,10 +382,13 @@ jobs:
             exit 1
           fi
           echo "  ✅ KSU 门禁通过：SukiSU-Nova 已确认编入 Image（manager=$MANAGER）"
+          else
+            echo "  ⏭ 跳过 KSU 门禁：manager=none（纯净 GKI，不内置 root）"
+          fi
           INFO=$(find "$EXEC" -maxdepth 9 -type f -name 'gki-info.txt' -path '*kernel_aarch64*' 2>/dev/null | head -1)
           if [ -n "$INFO" ]; then echo '==== gki-info.txt ===='; cat "$INFO"; fi
           # ===== SUSFS 符号逐项核对（不是二值门禁，是 nm vmlinux 差集比对 + 详细缺失清单）=====
-          if [ "$ENABLE_SUSFS" = "true" ]; then
+          if [ "$ENABLE_SUSFS" = "true" ] && [ "$MANAGER" != "none" ]; then
             echo "==== SUSFS 符号核对开始 ===="
             VMLINUX=$(find "$EXEC" -maxdepth 12 -type f -name 'vmlinux' 2>/dev/null | head -1)
             if [ -z "$VMLINUX" ] || [ ! -f "$VMLINUX" ]; then
@@ -424,7 +433,7 @@ jobs:
           ls -la "$D"
 
       - name: 集成 KernelPatch（KPM 加载器，enable_kpm=true 时才做）
-        if: env.ENABLE_KPM == 'true'
+        if: env.ENABLE_KPM == 'true' && env.MANAGER != 'none'
         run: |
           set -uo pipefail
           # kpimg 是 freestanding 裸机 ELF，必须 aarch64-none-elf 裸机交叉编译器
