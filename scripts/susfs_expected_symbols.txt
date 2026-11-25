@@ -1,0 +1,65 @@
+# SUSFS 期望符号清单（android15-6.6 主补丁 50_add_susfs_in_gki-android15-6.6.patch）
+# 用途：编译后 nm vmlinux 做符号差集比对（不是二值门禁，是逐项 diff + 详细缺失清单）
+# 来源：从主补丁现提取的非 static 全局 susfs_* 函数，分三处：
+#   fs/susfs.c（新增文件）          40 个
+#   fs/namespace.c                   2 个（guard: CONFIG_KSU_SUSFS）
+#   security/selinux/ss/services.c   5 个（guard: CONFIG_SECURITY_SELINUX）
+# 合计 47 个。每行一个符号，空行和 # 开头忽略。
+#
+# 注意：
+# - 不含 static 函数（不会进 vmlinux 全局符号表）
+# - 不含 extern 声明（只是声明不是定义）
+# - 含 2 个带 __attribute__((hot)) 前缀的函数，前缀不影响符号名
+# - susfs_is_current_ksu_domain 定义在 KSU 侧补丁（SukiSU-Nova 内置），不在此清单
+
+# --- fs/susfs.c（40 个） ---
+susfs_add_sus_type
+susfs_is_sus_type_rcu
+susfs_add_sus_avd_allowed_by_type
+susfs_spoof_avd_allowed_rcu
+susfs_add_sus_path
+susfs_add_sus_path_loop
+susfs_is_inode_sus_path
+susfs_set_sus_path_uid_filter
+susfs_parse_sus_path_app_strings
+susfs_is_uid_allowed_for_sus_path
+susfs_set_hide_sus_mnts_for_non_su_procs
+susfs_add_sus_kstat
+susfs_update_sus_kstat
+susfs_is_inode_sus_kstat
+susfs_sus_kstat_spoof_generic_fillattr
+susfs_sus_kstat_spoof_show_map_vma
+susfs_sus_kstat_spoof_vfs_statfs
+susfs_sus_kstat_spoof_inotify_fdinfo
+susfs_sus_kstat_spoof_proc_fd_seq_show
+susfs_set_uname
+susfs_spoof_uname
+susfs_enable_log
+susfs_set_cmdline_or_bootconfig
+susfs_spoof_cmdline_or_bootconfig
+susfs_add_open_redirect
+susfs_open_redirect_spoof_do_sys_openat
+susfs_open_redirect_spoof_vfs_readlink
+susfs_open_redirect_spoof_do_proc_readlink
+susfs_open_redirect_spoof_show_map_vma_srcu
+susfs_add_sus_map
+susfs_set_priority_uid_filter
+susfs_parse_priority_app_strings
+susfs_is_priority_uid_filtered
+susfs_set_avc_log_spoofing
+susfs_get_enabled_features
+susfs_show_variant
+susfs_show_version
+susfs_start_sdcard_monitor_fn
+susfs_init
+
+# --- fs/namespace.c（2 个，guard: CONFIG_KSU_SUSFS） ---
+susfs_get_non_sus_mnt_id_from_mnt
+susfs_get_non_sus_vfsmnt_from_vfsmnt
+
+# --- security/selinux/ss/services.c（5 个，guard: CONFIG_SECURITY_SELINUX） ---
+susfs_security_context_to_sid
+susfs_security_context_str_to_sid
+susfs_security_context_to_sid_default
+susfs_security_context_to_sid_force
+susfs_security_compute_av_user

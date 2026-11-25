@@ -372,6 +372,49 @@ jobs:
           echo "  ✅ KSU 门禁通过：SukiSU-Nova 已确认编入 Image（manager=$MANAGER）"
           INFO=$(find "$EXEC" -maxdepth 9 -type f -name 'gki-info.txt' -path '*kernel_aarch64*' 2>/dev/null | head -1)
           if [ -n "$INFO" ]; then echo '==== gki-info.txt ===='; cat "$INFO"; fi
+          # ===== SUSFS 符号逐项核对（不是二值门禁，是 nm vmlinux 差集比对 + 详细缺失清单）=====
+          if [ "$ENABLE_SUSFS" = "true" ]; then
+            echo "==== SUSFS 符号核对开始 ===="
+            VMLINUX=$(find "$EXEC" -maxdepth 12 -type f -name 'vmlinux' 2>/dev/null | head -1)
+            if [ -z "$VMLINUX" ] || [ ! -f "$VMLINUX" ]; then
+              echo "  ⚠ 未在 execroot 找到 vmlinux，打印所有 vmlinux/System.map 候选路径以便下次校准："
+              find "$EXEC" -maxdepth 12 -type f \( -name 'vmlinux' -o -name 'System.map' \) 2>/dev/null | head -20
+              echo "  ⚠ 本次无法做符号核对（vmlinux 取样点未命中），不阻断，仅告警"
+            else
+              echo "  vmlinux = $VMLINUX"
+              cp -v "$VMLINUX" "$D/vmlinux"
+              EXPECT="$GITHUB_WORKSPACE/scripts/susfs_expected_symbols.txt"
+              test -f "$EXPECT" || { echo "::error::缺期望符号清单 $EXPECT"; exit 1; }
+              ACTUAL_TMP="$D/susfs_actual.syms"
+              nm "$VMLINUX" 2>/dev/null | awk '$2 ~ /^[tTdDbBrR]$/ {print $3}' | grep '^susfs_' | sort -u > "$ACTUAL_TMP"
+              actual_cnt=$(wc -l < "$ACTUAL_TMP")
+              echo "  实际 susfs_* 符号数（nm vmlinux）: $actual_cnt"
+              echo '  ---- 逐项核对 ----'
+              miss=0
+              while IFS= read -r sym; do
+                case "$sym" in ''|\#*) continue;; esac
+                if grep -qxF "$sym" "$ACTUAL_TMP"; then
+                  echo "    ✓ $sym"
+                else
+                  echo "    ✗ 缺失 $sym"
+                  miss=$((miss+1))
+                fi
+              done < "$EXPECT"
+              echo "  ---- 缺失合计: $miss 个 ----"
+              extra=$(comm -13 <(grep -E '^susfs_' "$EXPECT" | sort -u) "$ACTUAL_TMP")
+              if [ -n "$extra" ]; then
+                echo "  ---- 实际有但不在期望清单的 susfs_* 符号（供核对，非错误） ----"
+                echo "$extra" | sed 's/^/    + /'
+              fi
+              rm -f "$ACTUAL_TMP"
+              if [ "$miss" -gt 0 ]; then
+                echo "::warning::SUSFS 符号缺失 $miss 个（详见上方清单），建议实机验证前人工复核"
+              else
+                echo "  ✅ SUSFS 符号核对通过：47 个期望符号全部命中"
+              fi
+            fi
+            echo "==== SUSFS 符号核对结束 ===="
+          fi
           ls -la "$D"
 
       - name: 打包 AnyKernel3 刷机包
@@ -474,6 +517,7 @@ jobs:
             dist/*.zip
             dist/system_dlkm.ext4.img
             dist/system_dlkm.erofs.img
+            dist/vmlinux
           if-no-files-found: warn
 
       - name: 上传编译日志
