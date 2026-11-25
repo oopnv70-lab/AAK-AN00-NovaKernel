@@ -18,7 +18,7 @@
 #
 # 工具链（已查实，比最初设想的简单得多）：
 #   kptools  -> 纯 C，系统 gcc（build-essential 自带）+ zlib，`make` 一条命令，无需 NDK。
-#   kpimg    -> 裸机 gcc aarch64-none-elf（workflow「安装构建依赖」已从 ARM 官方下载）。
+#   kpimg    -> 裸机 gcc aarch64-none-elf（workflow「集成 KernelPatch」步骤按需下载，仅 enable_kpm=true 时）。
 #   不需要 NDK、不需要单独编 kpatch（kptools 的 -p 就是 patch 功能）。
 #
 # 集成方式（老方法：CI 构建时当场 git clone 拉取 + 当场编，不本地打包上传）：
@@ -59,7 +59,7 @@ fi
 # ============ 3) 工具链探测 ============
 echo "==> 工具链探测"
 command -v gcc >/dev/null 2>&1 || { echo "::error::缺 gcc（kptools 编译需要）"; exit 1; }
-command -v aarch64-none-elf-gcc >/dev/null 2>&1 || { echo "::error::缺 aarch64-none-elf-gcc（kpimg 编译需要，workflow 安装依赖应已装）"; exit 1; }
+command -v aarch64-none-elf-gcc >/dev/null 2>&1 || { echo "::error::缺 aarch64-none-elf-gcc（kpimg 编译需要，workflow「集成 KernelPatch」步骤应已按需下载）"; exit 1; }
 echo "    gcc                 : OK ($(gcc --version | head -1))"
 echo "    aarch64-none-elf-gcc: OK ($(aarch64-none-elf-gcc --version | head -1))"
 
