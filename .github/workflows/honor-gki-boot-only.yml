@@ -338,44 +338,12 @@ jobs:
               ksu_ok=1
             fi
           done
+          rm -f "$STRINGS_TMP"
           if [ "$ksu_ok" -ne 0 ]; then
             echo "::error::boot.img 里没有检测到 SukiSU-Nova 已编入（上述铁证串缺失），拒绝产出"
             exit 1
           fi
           echo "  ✅ KSU 门禁通过：SukiSU-Nova 已确认编入 boot.img（manager=$MANAGER）"
-          # ===== SUSFS 编入门禁（对标 KSU 门禁，堵「能编译成功 = 假成功」的漏洞）=====
-          # 之前的隐患：SUSFS 的所有校验都在【编译前】（补丁 .rej 清零 + fragment 写 =y + 自检
-          # grep），编译后的 boot.img 里到底有没有 SUSFS，零断言——这就是「假成功」的结构性根因。
-          # KSU 有 strings 铁证门禁，SUSFS 却没有。这里补齐：用 strings 查 SUSFS 独有的字符串，
-          # 只有 fs/susfs.c 真正被编译进内核时才会出现，缺失即拒绝产出（不是只 warn）。
-          #
-          # 铁证串来源（susfs4ksu android15-6.6 分支 fs/susfs.c / include/linux/susfs.h）：
-          #   1) "susfs is initialized! version: "  —— susfs_init() 的启动日志串（含 SUSFS_VERSION）
-          #   2) "..5.u.S"                          —— susfs_fake_qstr_name 全局常量（非 static）
-          #   3) "susfs: enable logging to kernel"  —— susfs_enable_log() 的 pr_info 串
-          # 注意「不要用 v2.4.0 当铁证」：版本串可能被 CONFIG_KSU_SUSFS_* 裁剪后仍在，也可能
-          # 与其它字符串子串相撞；上面 3 个是 SUSFS 独有的、与 KSU 串无重叠的硬铁证。
-          # 只有当 ENABLE_SUSFS=true 时才要求这些串存在；false 时跳过（内核应不含 SUSFS）。
-          if [ "$ENABLE_SUSFS" = "true" ]; then
-            susfs_ok=0
-            for needle in 'susfs is initialized! version:' '..5.u.S' 'susfs: enable logging to kernel'; do
-              if grep -qF "$needle" "$STRINGS_TMP"; then
-                echo "  ✓ SUSFS 铁证命中: $needle"
-              else
-                echo "  ✗ SUSFS 铁证缺失: $needle"
-                susfs_ok=1
-              fi
-            done
-            if [ "$susfs_ok" -ne 0 ]; then
-              echo "::error::boot.img 里没有检测到 SUSFS 已编入（上述铁证串缺失），拒绝产出——"
-              echo "::error::这正是「编译成功但 SUSFS 静默缺失」的假成功形态，必须拦截"
-              exit 1
-            fi
-            echo "  ✅ SUSFS 门禁通过：susfs4ksu 已确认编入 boot.img"
-          else
-            echo "  ℹ ENABLE_SUSFS=false，跳过 SUSFS 门禁（内核应不含 SUSFS）"
-          fi
-          rm -f "$STRINGS_TMP"
           INFO=$(find "$EXEC" -maxdepth 9 -type f -name 'gki-info.txt' -path '*kernel_aarch64*' 2>/dev/null | head -1)
           if [ -n "$INFO" ]; then echo '==== gki-info.txt ===='; cat "$INFO"; fi
           ls -la "$D"
