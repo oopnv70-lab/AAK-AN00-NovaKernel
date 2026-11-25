@@ -17,8 +17,9 @@
 #      + 复制 3 个新增文件：fs/susfs.c、include/linux/susfs.h、include/linux/susfs_def.h
 #   2) 在 ksu_defconfig fragment 里打开 CONFIG_KSU_SUSFS=y + INLINE_HOOK + 11 子项
 #
-# 失败语义：主补丁若产生 .rej，仅 fs/exec.c 这一处是已知的（荣耀删了 dma-buf.h
-#   锚点），由下面的 fix_rej_include 定点补齐；其余任何 .rej 都属未知，硬失败。
+# 失败语义：主补丁产生的 .rej 中，mm/memory.c（删 zswap.h）和 fs/proc/base.c
+#   （删 dma-buf.h）两处是已知的，由下面的 fix_rej_include 定点补齐；其余任何
+#   .rej 都属未知，硬失败（exit 1），避免「假成功」。
 set -euo pipefail
 
 ROOT="${1:?用法: integrate_susfs.sh <KERNEL_PLATFORM>}"
@@ -76,21 +77,20 @@ echo "==> 完整 patch 结果（hunk 明细） =="
 cat /tmp/susfs-main-apply.log
 
 # ============ 2.5) 补齐已知 .rej 的 susfs_def.h include（荣耀 6.6 树专属） ============
-# 背景（对荣耀 AAK-AN00 真实源码树 grep 坐实，非类推、非照搬一加）：
-#   逐一对 susfs4ksu 6.6 补丁的 15 处 susfs_def.h include 锚点 + 8 处 trace/hooks
-#   锚点做了存在性核对，结论：荣耀树【只删了 1 处】——
-#     fs/exec.c 的 `#include <linux/dma-buf.h>`（连同 `#ifndef __GENKSYMS__` 块整段删除）。
-#   上游补丁在 exec.c 的第一个 hunk 以该 dma-buf.h 行当锚点，在其上插入
-#   `#include <linux/susfs_def.h>`；锚点缺失 → 该 hunk FAILED → susfs_def.h 打不上。
+# 背景（荣耀 AAK-AN00 真实源码树 + 构建日志双重坐实）：
+#   荣耀树删了 3 处补丁 hunk 依赖的 include 锚点：
+#     mm/memory.c    删 #include <linux/zswap.h>
+#     fs/proc/base.c 删 #include <linux/dma-buf.h>
+#     fs/exec.c      删 #include <linux/dma-buf.h>（在 #ifndef __GENKSYMS__ 块内）
+#   但实际产生 .rej 的只有 mm/memory.c 和 fs/proc/base.c 两处：
+#     - memory.c / base.c 缺的行在 include 链中间，前后文对不上 → Hunk #1 FAILED
+#     - exec.c 缺的行在 __GENKSYMS__ 条件块里，patch 的 fuzz 容错 → succeeded with fuzz 2
+#   所以垫片只补 memory.c 和 base.c 两个文件，exec.c 无需垫片（fuzz 已消化）。
 #
-#   其余全部锚点（含 mm/memory.c 的 trace/events/kmem.h、fs/proc/base.c 的
-#   trace/events/oom.h、以及 6.6 相对 6.1 新增的 trace/hooks/fs.h）在荣耀树里
-#   都在，无需垫片。此前版本错误地「补」了 mm/memory.c 和 fs/proc/base.c 两个
-#   文件（它们锚点其实都在，是照搬一加 zswap/dma-buf 臆想，非实测），已删除。
-#
-#   修复：在 fs/exec.c 的现存锚点 `#include <linux/page_size_compat.h>` 之后
-#   手动插入 susfs_def.h include（该行在荣耀树里唯一且位置与补丁意图一致），
-#   与上游补丁等价，不碰荣耀删除 dma-buf.h 的改动。
+#   修复：在「被删行的上一行（荣耀树仍存在）」之后插入 susfs_def.h include，
+#   与上游补丁等价（补丁本意就是在那一行后插入 susfs_def.h）。
+#     memory.c 锚点 = #include <linux/sched/sysctl.h>（zswap.h 应在它下一行）
+#     base.c   锚点 = #include <linux/cpufreq_times.h>（dma-buf.h 应在它下一行）
 fix_rej_include() {
   local file="$1" anchor="$2" guard="$3"
   local abs="$COMMON/$file"
@@ -123,11 +123,21 @@ fix_rej_include() {
 }
 
 echo "==> 补齐已知 .rej 的 susfs_def.h include"
-# 唯一需要垫片的文件：fs/exec.c（荣耀删了 dma-buf.h 锚点）。
-# 锚点用还在的 page_size_compat.h（荣耀树唯一），guard 与上游补丁一致用 CONFIG_KSU_SUSFS。
-fix_rej_include "fs/exec.c" \
-  "#include <linux/page_size_compat.h>" \
-  "#ifdef CONFIG_KSU_SUSFS" || { echo "::error::fs/exec.c include 补齐失败"; exit 1; }
+# 构建日志坐实：只有 mm/memory.c 和 fs/proc/base.c 两个文件 Hunk #1 FAILED，
+# 根因是荣耀树删了这两个文件里补丁 hunk 锚点链中间的一行：
+#   mm/memory.c   删了 #include <linux/zswap.h>（sched/sysctl.h 与 trace/events/kmem.h 之间）
+#   fs/proc/base.c 删了 #include <linux/dma-buf.h>（cpufreq_times.h 与 trace/events/oom.h 之间）
+# fs/exec.c 虽也删了 dma-buf.h，但补丁 hunk 靠 fuzz 2 自己匹配成功了（无需垫片）。
+#
+# 修复：在「被删行的上一行（仍存在）」之后插入 susfs_def.h include，与上游补丁等价。
+#   memory.c 锚点 = sched/sysctl.h（荣耀树第 80 行，zswap.h 应在它下一行）
+#   base.c   锚点 = cpufreq_times.h（荣耀树第 101 行，dma-buf.h 应在它下一行）
+fix_rej_include "mm/memory.c" \
+  "#include <linux/sched/sysctl.h>" \
+  "#ifdef CONFIG_KSU_SUSFS_SUS_MAP" || { echo "::error::mm/memory.c include 补齐失败"; exit 1; }
+fix_rej_include "fs/proc/base.c" \
+  "#include <linux/cpufreq_times.h>" \
+  "#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)" || { echo "::error::fs/proc/base.c include 补齐失败"; exit 1; }
 # 垫片后仍残留的 .rej = 未知的新锚点缺失（荣耀树还删了别的、或补丁上游变了）。
 # 这种情况不能静默放过——放过就是「假成功」：susfs_def.h 没进某个文件，
 # 后续 hunk 用到 susfs_* 宏/函数时要么编译报 undeclared（侥幸暴露），
