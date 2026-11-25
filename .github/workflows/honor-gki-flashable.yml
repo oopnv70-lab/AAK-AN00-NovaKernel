@@ -482,6 +482,17 @@ jobs:
           cp "$D/Image" ./Image
           chmod +x tools/* 2>/dev/null || true
 
+          # ===== 许可证合规：把仓库根的许可证/声明文件随包分发 =====
+          # GPL-2.0（内核主体 + SukiSU-Nova）、GPL-3.0（susfs4ksu）、BSD-3-Clause（AnyKernel3）、
+          # Apache-2.0（kernel/build 工具链）的全文与逐项 NOTICE 声明必须进刷机包，
+          # 才能满足「随二进制分发须附带许可证文本」的义务。纯文本文件，不影响刷写与成败。
+          cp -v "$GITHUB_WORKSPACE/LICENSE" ./LICENSE
+          cp -v "$GITHUB_WORKSPACE/NOTICE.md" ./NOTICE.md
+          mkdir -p ./LICENSES
+          cp -v "$GITHUB_WORKSPACE"/LICENSES/*.txt ./LICENSES/
+          echo '==== 许可证文件已入包 ===='
+          ls -l LICENSE NOTICE.md LICENSES/
+
           echo '==== 包内根目录 ===='
           ls -l anykernel.sh Image
           bash -n anykernel.sh || { echo "::error::anykernel.sh 语法错误"; exit 1; }
@@ -500,6 +511,11 @@ jobs:
           unzip -l "$ZIP" | grep -q 'META-INF/com/google/android/update-binary' || { echo "::error::zip 缺 update-binary"; exit 1; }
           unzip -l "$ZIP" | grep -q 'tools/ak3-core.sh' || { echo "::error::zip 缺 tools/ak3-core.sh"; exit 1; }
           unzip -l "$ZIP" | grep -qE ' Image$' || { echo "::error::zip 缺 Image"; exit 1; }
+          # ===== 许可证合规门禁：确认许可证/声明文件已进包 =====
+          for f in 'LICENSE' 'NOTICE.md' 'LICENSES/GPL-2.0.txt' 'LICENSES/GPL-3.0.txt' 'LICENSES/Apache-2.0.txt'; do
+            unzip -l "$ZIP" | grep -qE "[[:space:]]$f$" || { echo "::error::zip 缺许可证文件 $f"; exit 1; }
+            echo "  ✓ 许可证文件在包内: $f"
+          done
           ls -lh "$ZIP"
           {
             echo '### AnyKernel3 刷机包'
