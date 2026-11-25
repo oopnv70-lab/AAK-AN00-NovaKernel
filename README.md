@@ -12,6 +12,7 @@
 - **内核源码**：荣耀开源发布中心 `AAK-AN00_MagicOS10.0_Opensource.zip`（Linux 6.6.56，厂商魔改）
 - **构建工具链**：AOSP `kernel/build`（Kleaf）+ `kernel/manifest` 分支 `common-android15-6.6`
 - **集成组件**：SukiSU-Nova（builtin-new 分支，GPL-2.0），通过 `defconfig_fragments` 注入 `CONFIG_KSU=y`
+- **功能组件**：susfs4ksu（simonpunk，`gki-android15-6.6` 分支，GPL-3.0），SUSFS 路径隐藏/重定向/maps 欺骗
 - **打包模板**：AnyKernel3（osm0sis，BSD-3-Clause）
 
 ## 目录结构

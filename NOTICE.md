@@ -6,19 +6,22 @@
 
 ## 第三方组件许可证清单
 
-| 组件 | 许可证 | 来源 | 用途 |
-| --- | --- | --- | --- |
-| 荣耀 AAK-AN00 开源源码（Linux 内核 6.6.56） | GPL-2.0 | 荣耀开源发布中心 `AAK-AN00_MagicOS10.0_Opensource.zip` | 编译内核本体 |
-| SukiSU-Nova（builtin-new 分支） | GPL-2.0 | https://github.com/SukiSU-Nova/SukiSU-Nova | 集成 KernelSU 功能（内置，CONFIG_KSU=y） |
-| AOSP kernel/build（Kleaf 构建工具链） | Apache-2.0 | https://android.googlesource.com/kernel/build | Bazel/Kleaf 构建工具链 |
-| AOSP kernel/common（android15-6.6） | GPL-2.0 | https://android.googlesource.com/kernel/common | 内核源码基线（被荣耀源码覆盖） |
-| AnyKernel3（osm0sis） | BSD-3-Clause | https://github.com/osm0sis/AnyKernel3 | AnyKernel3 刷机包打包模板 |
-| susfs4ksu（simonpunk） | GPL-3.0 | https://gitlab.com/simonpunk/susfs4ksu | SUSFS 功能（`gki-android15-6.6` 分支主补丁 + 新增源码 `fs/susfs.c` 等） |
+下表把「组件 → 许可证 → 精确仓库链接（含分支）→ 对应 LICENSE 文件」逐一锁死，
+确保拿到本工程/刷机包的任何人都能查到「哪段代码对应哪个许可证、哪个仓库」。
+
+| 组件 | 许可证 | 仓库链接（含分支） | LICENSE 文件 | 用途 |
+| --- | --- | --- | --- | --- |
+| 荣耀 AAK-AN00 开源源码（Linux 内核 6.6.56） | GPL-2.0 | https://www.honor.com/global/opensource/ （按型号 `AAK-AN00` 检索，包名 `AAK-AN00_MagicOS10.0_Opensource.zip`；文件 URL 为实时签名、会过期，故只记入口） | `LICENSES/GPL-2.0.txt` | 编译内核本体 |
+| SukiSU-Nova（`builtin-new` 分支） | GPL-2.0 | https://github.com/SukiSU-Nova/SukiSU-Nova.git （分支 `builtin-new`） | `LICENSES/GPL-2.0.txt` | 集成 KernelSU 功能（内置，CONFIG_KSU=y） |
+| AOSP kernel/common（`common-android15-6.6` 分支） | GPL-2.0 | https://android.googlesource.com/kernel/common （分支 `common-android15-6.6`，经 `kernel/manifest` 拉取） | `LICENSES/GPL-2.0.txt` | 内核源码基线（被荣耀源码覆盖） |
+| AOSP kernel/build（Kleaf 构建工具链） | Apache-2.0 | https://android.googlesource.com/kernel/build | `LICENSES/Apache-2.0.txt` | Bazel/Kleaf 构建工具链 |
+| AnyKernel3（osm0sis） | BSD-3-Clause | https://github.com/osm0sis/AnyKernel3 | `LICENSES/AnyKernel3-LICENSE.txt` | AnyKernel3 刷机包打包模板 |
+| susfs4ksu（simonpunk） | GPL-3.0 | https://gitlab.com/simonpunk/susfs4ksu.git （分支 `gki-android15-6.6`） | `LICENSES/GPL-3.0.txt` | SUSFS 功能（主补丁 + 新增源码 `fs/susfs.c` 等） |
 
 各许可证全文见 `LICENSES/` 目录：
-- `GPL-2.0.txt` —— GNU GPL v2.0 标准原文
+- `GPL-2.0.txt` —— GNU GPL v2.0 标准原文（荣耀内核 / SukiSU-Nova / AOSP kernel/common 共用）
 - `GPL-3.0.txt` —— GNU GPL v3.0 标准原文（susfs4ksu）
-- `Apache-2.0.txt` —— Apache License 2.0 标准原文
+- `Apache-2.0.txt` —— Apache License 2.0 标准原文（AOSP kernel/build）
 - `AnyKernel3-LICENSE.txt` —— AnyKernel3 的 BSD-3-Clause 许可证原文
 
 ## 重要说明
