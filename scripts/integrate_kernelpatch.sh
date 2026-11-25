@@ -19,11 +19,12 @@
 # 集成方式（老方法：CI 构建时当场 git clone 拉取，不本地打包上传）：
 #   与 integrate_sukisu.sh / integrate_susfs.sh 一致，clone 源固定为 GitHub。
 #
-# TODO（尚未完成，待工具链方案确认后再补）：
-#   KernelPatch 三件套的编译依赖较重：
-#     - kptools 需要 cmake + NDK（build.sh 写死 r29，CI 需当场装）
-#     - kpimg   需要裸机交叉编译器 aarch64-none-elf-gcc（CI ubuntu 镜像默认无）
-#     - kpatch  需要 g++ / NDK clang
+# TODO（尚未完成，待后处理逻辑补全）：
+#   工具链已在 workflow「安装构建依赖」步骤就位：
+#     - cmake            -> apt 安装（已加进依赖清单）
+#     - aarch64-none-elf-gcc -> ARM 官方 GNU 工具链 14.3.rel1，解压到 /opt 并加 PATH
+#     - NDK             -> 尚未在 CI 安装（kptools/kpatch 的 cmake 工具链需要，待补）
+#     - g++             -> build-essential 已带
 #   当前脚本只做「当场拉取 + 工具链探测 + 前提核验」，后处理动作留空（见下方 TODO）。
 set -euo pipefail
 
@@ -94,9 +95,11 @@ fi
 #   4. 运行 kpatch，产出「KP 补丁版」Image
 #   5. 用补丁后的 Image 替换原 Image，供 AnyKernel3 打包
 #
-# TODO: 上述 1-5 步当前留空。原因：工具链（尤其裸机 aarch64-none-elf-gcc）在
-#   GitHub Actions ubuntu 镜像默认缺失，且 build.sh 里的 NDK 路径是本地硬编码
-#   （/root/other/ndk/android-ndk-r29），不能直接用于 CI。工具链方案确认后再补。
+# TODO: 上述 1-5 步当前留空。原因：后处理逻辑（编译 kptools/kpimg/kpatch 并打补丁）
+#   尚未实现。工具链（cmake / aarch64-none-elf-gcc / g++）已由 workflow「安装构建依赖」
+#   步骤就位，但 NDK 尚未在 CI 安装（kptools/kpatch 的 cmake 交叉编译需要 NDK），
+#   且 build.sh 里的 NDK 路径为本地硬编码（/root/other/ndk/android-ndk-r29），
+#   需把 NDK 也纳入安装依赖后再补后处理逻辑。
 
 if [ $have_cmake = 1 ] && [ $have_ndk = 1 ] && [ $have_noneelf = 1 ] && [ $have_gxx = 1 ]; then
   echo "==> 工具链齐全，但后处理逻辑尚未实现（TODO）——当前仅完成拉取 + 核验"

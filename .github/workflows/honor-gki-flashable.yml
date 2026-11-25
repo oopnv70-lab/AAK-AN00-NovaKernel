@@ -84,7 +84,22 @@ jobs:
             git-core gnupg flex bison build-essential zip unzip curl zlib1g-dev \
             libc6-dev libncurses-dev libssl-dev libelf-dev bc cpio rsync \
             python3 python3-pip dwarves lz4 device-tree-compiler ccache \
-            file libarchive-tools libxml2-utils aria2
+            file libarchive-tools libxml2-utils aria2 cmake
+          # KernelPatch（KPM 加载器）需要 aarch64-none-elf 裸机交叉编译器（kpimg 是
+          # freestanding 裸机 ELF，不能用 gcc-aarch64-linux-gnu 代替）。apt 无此包，
+          # 从 ARM 官方 GNU 工具链下载（14.3.rel1，x86_64 宿主 + aarch64-none-elf 目标）。
+          ARM_TC_VER="14.3.rel1"
+          ARM_TC_DIR="/opt/arm-gnu-toolchain-${ARM_TC_VER}-x86_64-aarch64-none-elf"
+          if [ ! -x "${ARM_TC_DIR}/bin/aarch64-none-elf-gcc" ]; then
+            curl -fsSL \
+              "https://developer.arm.com/-/media/Files/downloads/gnu/${ARM_TC_VER}/binrel/arm-gnu-toolchain-${ARM_TC_VER}-x86_64-aarch64-none-elf.tar.xz" \
+              -o /tmp/arm-gnu-toolchain.tar.xz
+            sudo mkdir -p /opt
+            sudo tar -xJf /tmp/arm-gnu-toolchain.tar.xz -C /opt
+            rm -f /tmp/arm-gnu-toolchain.tar.xz
+          fi
+          echo "${ARM_TC_DIR}/bin" >> "$GITHUB_PATH"
+          aarch64-none-elf-gcc --version | head -1
 
       - name: 记录运行机指纹
         run: |
