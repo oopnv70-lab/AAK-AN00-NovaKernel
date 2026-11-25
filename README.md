@@ -13,6 +13,7 @@
 - **构建工具链**：AOSP `kernel/build`（Kleaf）+ `kernel/manifest` 分支 `common-android15-6.6`
 - **集成组件**：SukiSU-Nova（builtin-new 分支，GPL-2.0），通过 `defconfig_fragments` 注入 `CONFIG_KSU=y`
 - **功能组件**：susfs4ksu（simonpunk，`gki-android15-6.6` 分支，GPL-3.0），SUSFS 路径隐藏/重定向/maps 欺骗
+- **KPM 支持**：KernelPatch（SukiSU-Nova fork，fork 自 bmax121/KernelPatch / APatch，`main` 分支，GPL-2.0），KPM 内核补丁模块加载器（对已编译 Image 后处理）
 - **打包模板**：AnyKernel3（osm0sis，BSD-3-Clause）
 
 ## 目录结构
@@ -20,6 +21,8 @@
 - `scripts/` —— 源码拉取与集成脚本
   - `fetch_honor_source.sh` —— 从荣耀开源中心拉取并解压源码
   - `integrate_sukisu.sh` —— 集成 SukiSU-Nova（软链 + Kconfig/Makefile 注入 + defconfig fragment）
+  - `integrate_susfs.sh` —— 集成 SUSFS（susfs4ksu，内核侧主补丁 + 3 个新增文件）
+  - `integrate_kernelpatch.sh` —— 集成 KernelPatch（KPM 加载器，对已编译 Image 后处理；CI 当场拉取，非本地打包）
   - `get_opensource_link.sh` —— 获取荣耀开源包下载链接
 - `src/` —— 辅助源码/脚本
 - `docs/` —— 文档、笔记、调研记录

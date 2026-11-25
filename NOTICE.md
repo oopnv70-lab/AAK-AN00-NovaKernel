@@ -17,6 +17,7 @@
 | AOSP kernel/build（Kleaf 构建工具链） | Apache-2.0 | https://android.googlesource.com/kernel/build | `LICENSES/Apache-2.0.txt` | Bazel/Kleaf 构建工具链 |
 | AnyKernel3（osm0sis） | BSD-3-Clause | https://github.com/osm0sis/AnyKernel3 | `LICENSES/AnyKernel3-LICENSE.txt` | AnyKernel3 刷机包打包模板 |
 | susfs4ksu（simonpunk） | GPL-3.0 | https://gitlab.com/simonpunk/susfs4ksu.git （分支 `gki-android15-6.6`） | `LICENSES/GPL-3.0.txt` | SUSFS 功能（主补丁 + 新增源码 `fs/susfs.c` 等） |
+| KernelPatch（SukiSU-Nova fork，fork 自 bmax121/KernelPatch / APatch） | GPL-2.0 | https://github.com/SukiSU-Nova/SukiSU_KernelPatch_patch.git （分支 `main`，v0.14.0） | `LICENSES/GPL-2.0.txt` | KPM 内核补丁模块加载器（kptools / kpimg / kpatch，对已编译 Image 后处理） |
 
 各许可证全文见 `LICENSES/` 目录：
 - `GPL-2.0.txt` —— GNU GPL v2.0 标准原文（荣耀内核 / SukiSU-Nova / AOSP kernel/common 共用）
@@ -40,9 +41,15 @@
    但本项目遵循 susfs4ksu 上游的既有集成实践（SUSFS 作为内核模块补丁被广泛并入 GPL-2.0
    内核），并在刷机包内同时附带 GPL-2.0 与 GPL-3.0 全文，以保留双方许可证义务的落点。
 
-4. **AI 参与声明**：本工程的构建脚本、CI 流程与集成方案由 AI（Operit）辅助编写与验证。
+4. **KernelPatch 为 GPL-2.0**：KPM（Kernel Patch Module）的内核侧加载器来自
+   `SukiSU-Nova/SukiSU_KernelPatch_patch`（GPL-2.0，v0.14.0，fork 自 bmax121/KernelPatch，
+   即 APatch 的内核补丁部分）。它不对内核源码重编译，而是对已编译 Image 做后处理
+   （kptools 解析符号偏移、kpimg 附加启动入口、kpatch 静态修补）。KPM 的完整可用需
+   `CONFIG_KPM=y`（SukiSU-Nova 侧桥接）+ KernelPatch 补丁（加载器）两者兼备。
+
+5. **AI 参与声明**：本工程的构建脚本、CI 流程与集成方案由 AI（Operit）辅助编写与验证。
    刷机与使用风险自负。
 
-5. **刷机风险**：自编译 GKI 未使用厂商私钥签名，且公开源码版本（6.6.56）可能不等于真机固件
+6. **刷机风险**：自编译 GKI 未使用厂商私钥签名，且公开源码版本（6.6.56）可能不等于真机固件
    版本（6.6.89），AVB / vermagic 不匹配时刷入可能无法开机。请在解锁引导加载程序并理解风险
    后操作。
