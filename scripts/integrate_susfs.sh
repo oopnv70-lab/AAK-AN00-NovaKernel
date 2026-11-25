@@ -142,7 +142,9 @@ fix_rej_include "fs/proc/base.c" \
 # 这种情况不能静默放过——放过就是「假成功」：susfs_def.h 没进某个文件，
 # 后续 hunk 用到 susfs_* 宏/函数时要么编译报 undeclared（侥幸暴露），
 # 要么被 #ifdef 裁掉（静默功能缺失，比编译失败更糟）。
-LEFT_REJ=$(find "$COMMON" -name '*.rej' 2>/dev/null | grep -v '/.git/' | sort)
+# 注意：grep -v 在无匹配时会返回 1，在 `set -euo pipefail` 下会误杀脚本，
+# 所以必须 `|| true` 兜底。LEFT_REJ 为空 = 无残留 .rej，是正常情况。
+LEFT_REJ=$(find "$COMMON" -name '*.rej' 2>/dev/null | grep -v '/.git/' | sort || true)
 if [ -n "$LEFT_REJ" ]; then
   echo "::error::垫片后仍有 $(printf '%s' "$LEFT_REJ" | grep -c .) 个 .rej，未处理的锚点缺失："
   printf '%s\n' "$LEFT_REJ"
