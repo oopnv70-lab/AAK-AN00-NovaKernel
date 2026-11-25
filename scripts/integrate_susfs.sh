@@ -17,8 +17,8 @@
 #      + 复制 3 个新增文件：fs/susfs.c、include/linux/susfs.h、include/linux/susfs_def.h
 #   2) 在 ksu_defconfig fragment 里打开 CONFIG_KSU_SUSFS=y + INLINE_HOOK + 11 子项
 #
-# 失败语义：主补丁若产生 .rej（荣耀树删了 include 锚点，如 dma-buf.h / zswap.h），
-#   本脚本只负责「暴露失败」，不自动改写源码；.rej 保留，由后续编译环节自然失败。
+# 失败语义：主补丁若产生 .rej，仅 fs/exec.c 这一处是已知的（荣耀删了 dma-buf.h
+#   锚点），由下面的 fix_rej_include 定点补齐；其余任何 .rej 都属未知，硬失败。
 set -euo pipefail
 
 ROOT="${1:?用法: integrate_susfs.sh <KERNEL_PLATFORM>}"
@@ -76,18 +76,21 @@ echo "==> 完整 patch 结果（hunk 明细） =="
 cat /tmp/susfs-main-apply.log
 
 # ============ 2.5) 补齐已知 .rej 的 susfs_def.h include（荣耀 6.6 树专属） ============
-# 背景（本地源码树 grep 坐实，非类推）：
-#   荣耀 sm8650/android15-6.6 树的 mm/memory.c、fs/proc/base.c 两个文件
-#   【不 include】 <linux/zswap.h> / <linux/dma-buf.h>（头文件本身在树里完好，
-#   只是这两个 .c 文件不再引用）。上游补丁以这两个 include 行当锚点，
-#   在其后插入 #include <linux/susfs_def.h>，锚点缺失导致 Hunk #1 FAILED。
+# 背景（对荣耀 AAK-AN00 真实源码树 grep 坐实，非类推、非照搬一加）：
+#   逐一对 susfs4ksu 6.6 补丁的 15 处 susfs_def.h include 锚点 + 8 处 trace/hooks
+#   锚点做了存在性核对，结论：荣耀树【只删了 1 处】——
+#     fs/exec.c 的 `#include <linux/dma-buf.h>`（连同 `#ifndef __GENKSYMS__` 块整段删除）。
+#   上游补丁在 exec.c 的第一个 hunk 以该 dma-buf.h 行当锚点，在其上插入
+#   `#include <linux/susfs_def.h>`；锚点缺失 → 该 hunk FAILED → susfs_def.h 打不上。
 #
-#   注意：缺的不是 zswap.h/dma-buf.h 本身（它们无关紧要），而是 susfs_def.h
-#   这个 include——它的 Hunk #2（真正用到 SUSFS_IS_INODE_SUS_MAP 等宏的代码）
-#   已经成功打上，宏定义却在 susfs_def.h 里。不补 include 编译必报 undeclared。
+#   其余全部锚点（含 mm/memory.c 的 trace/events/kmem.h、fs/proc/base.c 的
+#   trace/events/oom.h、以及 6.6 相对 6.1 新增的 trace/hooks/fs.h）在荣耀树里
+#   都在，无需垫片。此前版本错误地「补」了 mm/memory.c 和 fs/proc/base.c 两个
+#   文件（它们锚点其实都在，是照搬一加 zswap/dma-buf 臆想，非实测），已删除。
 #
-#   修复：在这两个文件的【现存锚点】后手动插入 susfs_def.h include，
-#   与上游补丁意图完全一致，不碰荣耀的 zswap/dma-buf 逻辑。
+#   修复：在 fs/exec.c 的现存锚点 `#include <linux/page_size_compat.h>` 之后
+#   手动插入 susfs_def.h include（该行在荣耀树里唯一且位置与补丁意图一致），
+#   与上游补丁等价，不碰荣耀删除 dma-buf.h 的改动。
 fix_rej_include() {
   local file="$1" anchor="$2" guard="$3"
   local abs="$COMMON/$file"
@@ -120,13 +123,26 @@ fix_rej_include() {
 }
 
 echo "==> 补齐已知 .rej 的 susfs_def.h include"
-fix_rej_include "mm/memory.c" \
-  "#include <linux/sched/sysctl.h>" \
-  "#ifdef CONFIG_KSU_SUSFS_SUS_MAP" || { echo "::error::mm/memory.c include 补齐失败"; exit 1; }
-fix_rej_include "fs/proc/base.c" \
-  "#include <linux/cpufreq_times.h>" \
-  "#if defined(CONFIG_KSU_SUSFS_SUS_MAP) || defined(CONFIG_KSU_SUSFS_OPEN_REDIRECT)" || { echo "::error::fs/proc/base.c include 补齐失败"; exit 1; }
-echo "==> 补齐完成，剩余 .rej：$(find "$COMMON" -name '*.rej' 2>/dev/null | wc -l)"
+# 唯一需要垫片的文件：fs/exec.c（荣耀删了 dma-buf.h 锚点）。
+# 锚点用还在的 page_size_compat.h（荣耀树唯一），guard 与上游补丁一致用 CONFIG_KSU_SUSFS。
+fix_rej_include "fs/exec.c" \
+  "#include <linux/page_size_compat.h>" \
+  "#ifdef CONFIG_KSU_SUSFS" || { echo "::error::fs/exec.c include 补齐失败"; exit 1; }
+# 垫片后仍残留的 .rej = 未知的新锚点缺失（荣耀树还删了别的、或补丁上游变了）。
+# 这种情况不能静默放过——放过就是「假成功」：susfs_def.h 没进某个文件，
+# 后续 hunk 用到 susfs_* 宏/函数时要么编译报 undeclared（侥幸暴露），
+# 要么被 #ifdef 裁掉（静默功能缺失，比编译失败更糟）。
+LEFT_REJ=$(find "$COMMON" -name '*.rej' 2>/dev/null | grep -v '/.git/' | sort)
+if [ -n "$LEFT_REJ" ]; then
+  echo "::error::垫片后仍有 $(printf '%s' "$LEFT_REJ" | grep -c .) 个 .rej，未处理的锚点缺失："
+  printf '%s\n' "$LEFT_REJ"
+  for f in $LEFT_REJ; do
+    echo "  --- $f（前 12 行）"
+    grep -E '^@@|^\+\+\+' "$f" | head -12
+  done
+  exit 1
+fi
+echo "==> 补齐完成，剩余 .rej：0"
 
 # ============ 3) 复制 3 个新增文件 ============
 echo "==> 复制 3 个新增文件（fs/susfs.c + include/linux/susfs.{h,def.h}）"
