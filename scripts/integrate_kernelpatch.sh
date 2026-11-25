@@ -11,21 +11,19 @@
 #   __arm64_sys_truncate 不认识 magic，dispatch 永远 -EOPNOTSUPP。
 #
 # KernelPatch 本质（不是改内核源码重编译，而是对已编译 Image 后处理）：
-#   kptools  解析 Image 拿符号偏移（rest_init / __arm64_sys_truncate 等）
-#   kpimg    独立 ELF，附加到 Image 末尾替换启动入口
-#   kpatch   用户空间静态修补（patch.cpp）
+#   kptools  一个工具干完所有事：解析 Image 拿符号偏移 + 打补丁 + 附加 kpimg。
+#            它的 -p 选项（tools/patch.c）就是静态修补，-l 列出补丁信息。
+#   kpimg    独立 freestanding 裸机 ELF，被 kptools 附加到 Image 末尾、替换启动入口。
 #   依赖：CONFIG_KALLSYMS=y + has_syscall_wrapper（sukisu.c 第一道门禁）。
 #
-# 集成方式（老方法：CI 构建时当场 git clone 拉取，不本地打包上传）：
-#   与 integrate_sukisu.sh / integrate_susfs.sh 一致，clone 源固定为 GitHub。
+# 工具链（已查实，比最初设想的简单得多）：
+#   kptools  -> 纯 C，系统 gcc（build-essential 自带）+ zlib，`make` 一条命令，无需 NDK。
+#   kpimg    -> 裸机 gcc aarch64-none-elf（workflow「安装构建依赖」已从 ARM 官方下载）。
+#   不需要 NDK、不需要单独编 kpatch（kptools 的 -p 就是 patch 功能）。
 #
-# TODO（尚未完成，待后处理逻辑补全）：
-#   工具链已在 workflow「安装构建依赖」步骤就位：
-#     - cmake            -> apt 安装（已加进依赖清单）
-#     - aarch64-none-elf-gcc -> ARM 官方 GNU 工具链 14.3.rel1，解压到 /opt 并加 PATH
-#     - NDK             -> 尚未在 CI 安装（kptools/kpatch 的 cmake 工具链需要，待补）
-#     - g++             -> build-essential 已带
-#   当前脚本只做「当场拉取 + 工具链探测 + 前提核验」，后处理动作留空（见下方 TODO）。
+# 集成方式（老方法：CI 构建时当场 git clone 拉取 + 当场编，不本地打包上传）：
+#   与 integrate_sukisu.sh / integrate_susfs.sh 一致，clone 源固定为 GitHub，
+#   kptools/kpimg 均为「当场编」，不往仓库塞任何二进制。
 set -euo pipefail
 
 ROOT="${1:?用法: integrate_kernelpatch.sh <KERNEL_PLATFORM> <IMAGE_PATH>}"
@@ -58,54 +56,81 @@ else
   echo "::error::KernelPatch LICENSE 不是 GPL-2.0，中止"; exit 1
 fi
 
-# ============ 3) 工具链探测（诚实报告缺哪些，缺则跳过后续、不静默失败）============
+# ============ 3) 工具链探测 ============
 echo "==> 工具链探测"
-have_cmake=0; have_ndk=0; have_noneelf=0; have_gxx=0
-command -v cmake >/dev/null 2>&1 && have_cmake=1
-[ -n "${ANDROID_NDK_HOME:-}" ] || [ -n "${ANDROID_NDK:-}" ] && have_ndk=1
-command -v aarch64-none-elf-gcc >/dev/null 2>&1 && have_noneelf=1
-command -v g++ >/dev/null 2>&1 && have_gxx=1
-
-echo "    cmake                  : $([ $have_cmake = 1 ] && echo 'OK' || echo '缺失')"
-echo "    NDK (ANDROID_NDK_HOME) : $([ $have_ndk = 1 ] && echo 'OK' || echo '缺失')"
-echo "    aarch64-none-elf-gcc   : $([ $have_noneelf = 1 ] && echo 'OK' || echo '缺失')"
-echo "    g++                    : $([ $have_gxx = 1 ] && echo 'OK' || echo '缺失')"
+command -v gcc >/dev/null 2>&1 || { echo "::error::缺 gcc（kptools 编译需要）"; exit 1; }
+command -v aarch64-none-elf-gcc >/dev/null 2>&1 || { echo "::error::缺 aarch64-none-elf-gcc（kpimg 编译需要，workflow 安装依赖应已装）"; exit 1; }
+echo "    gcc                 : OK ($(gcc --version | head -1))"
+echo "    aarch64-none-elf-gcc: OK ($(aarch64-none-elf-gcc --version | head -1))"
 
 # ============ 4) 前提核验（Image 侧，决定「能不能干净打」）============
 echo "==> 前提核验（Image 侧）"
-# 4.1) CONFIG_KALLSYMS 是否已编入（KernelPatch 硬依赖）
 if strings -a "$IMAGE" 2>/dev/null | grep -qE 'kallsyms_lookup_name|kallsyms_expand_symbol'; then
-  echo "  ✓ Image 含 kallsyms 符号（CONFIG_KALLSYMS 已编入）"
+  echo "  ✓ Image 含 kallsyms 符号（CONFIG_KALLSYMS 已编入，KernelPatch 硬依赖满足）"
 else
-  echo "  ✗ Image 未检出 kallsyms 符号（CONFIG_KALLSYMS 可能未启用，KernelPatch 无法工作）"
-  echo "::warning::KernelPatch 依赖 CONFIG_KALLSYMS=y；若未启用，KPM 无法后处理。"
+  echo "::error::Image 未检出 kallsyms 符号，CONFIG_KALLSYMS 可能未启用，KernelPatch 无法工作"; exit 1
 fi
-# 4.2) __arm64_sys_truncate 符号是否在位（sukisu.c 的 hook 目标）
 if strings -a "$IMAGE" 2>/dev/null | grep -qE '__arm64_sys_truncate'; then
   echo "  ✓ Image 含 __arm64_sys_truncate（KP hook 目标在位）"
 else
-  echo "  ✗ Image 未检出 __arm64_sys_truncate（syscall wrapper 可能缺失，KP 无法 hook）"
+  echo "::error::Image 未检出 __arm64_sys_truncate，syscall wrapper 可能缺失，KP 无法 hook"; exit 1
 fi
 
-# ============ 5) 后处理（TODO：待工具链方案确认后补）============
-# 完整后处理流程（参考 build.sh，但 CI 需重新适配工具链）：
-#   1. 编译 kptools（cmake + NDK）：解析 Image 拿符号偏移
-#   2. 编译 kpimg（aarch64-none-elf-gcc）：独立 ELF，附加到 Image 末尾
-#   3. 编译 kpatch（g++/NDK clang）：对 Image 做静态修补
-#   4. 运行 kpatch，产出「KP 补丁版」Image
-#   5. 用补丁后的 Image 替换原 Image，供 AnyKernel3 打包
-#
-# TODO: 上述 1-5 步当前留空。原因：后处理逻辑（编译 kptools/kpimg/kpatch 并打补丁）
-#   尚未实现。工具链（cmake / aarch64-none-elf-gcc / g++）已由 workflow「安装构建依赖」
-#   步骤就位，但 NDK 尚未在 CI 安装（kptools/kpatch 的 cmake 交叉编译需要 NDK），
-#   且 build.sh 里的 NDK 路径为本地硬编码（/root/other/ndk/android-ndk-r29），
-#   需把 NDK 也纳入安装依赖后再补后处理逻辑。
+# ============ 5) 当场编译 kptools（纯 C，系统 gcc，无需 NDK）============
+echo "==> 编译 kptools"
+( cd "$KP_DIR/tools" && make -j"$(nproc)" ) || { echo "::error::kptools 编译失败"; exit 1; }
+test -x "$KP_DIR/tools/kptools" || { echo "::error::kptools 未产出"; exit 1; }
+echo "  ✓ kptools 编译完成: $KP_DIR/tools/kptools"
 
-if [ $have_cmake = 1 ] && [ $have_ndk = 1 ] && [ $have_noneelf = 1 ] && [ $have_gxx = 1 ]; then
-  echo "==> 工具链齐全，但后处理逻辑尚未实现（TODO）——当前仅完成拉取 + 核验"
-else
-  echo "==> 工具链不齐（cmake=$have_cmake ndk=$have_ndk noneelf=$have_noneelf gxx=$have_gxx）"
-  echo "    KernelPatch 后处理跳过（当前仅完成当场拉取 + 合规核验 + 前提探测）"
-fi
+# ============ 6) 当场编译 kpimg（裸机 gcc aarch64-none-elf）============
+echo "==> 编译 kpimg"
+( cd "$KP_DIR/kernel" && make TARGET_COMPILE=aarch64-none-elf- -j"$(nproc)" ) || { echo "::error::kpimg 编译失败"; exit 1; }
+test -f "$KP_DIR/kernel/kpimg" || { echo "::error::kpimg 未产出"; exit 1; }
+echo "  ✓ kpimg 编译完成: $KP_DIR/kernel/kpimg"
 
-echo "==> KernelPatch 集成脚本执行完毕（拉取 + 合规 + 前提核验完成，后处理 TODO）"
+# ============ 7) 后处理：kptools -p 打补丁（一条命令完成）============
+# 参考（不照搬）LingLuo17 系的真实 run 日志：kptools -p -i Image -k kpimg -o Image.kp -s SKEY。
+# kptools 必须给显式 -o（实测不给会报 "empty out image path"）。
+echo "==> KernelPatch 注入（kptools -p）"
+KPT="$KP_DIR/tools/kptools"
+KPIMG="$KP_DIR/kernel/kpimg"
+OUT="$IMAGE.kp"
+
+BEFORE=$(stat -c%s "$IMAGE")
+MAGIC=$(head -c 6 "$KPIMG")
+SKEY=$(python3 -c "import secrets;print(secrets.token_hex(8))")
+echo "  kpimg 魔数: $MAGIC"
+echo "  Image 大小(打补丁前): $BEFORE B"
+
+"$KPT" -p -i "$IMAGE" -k "$KPIMG" -o "$OUT" -s "$SKEY" 2>&1 | tee "$IMAGE.kptools.log" \
+  || { echo "::error::kptools -p 失败"; tail -40 "$IMAGE.kptools.log"; exit 1; }
+
+test -f "$OUT" || { echo "::error::kptools 未生成 $OUT"; exit 1; }
+AFTER=$(stat -c%s "$OUT")
+echo "  Image 大小: $BEFORE -> $AFTER (+$((AFTER-BEFORE)) B)"
+[ "$AFTER" -gt "$BEFORE" ] || { echo "::error::patch 后 Image 未变大，注入失败"; exit 1; }
+grep -a -qF "$MAGIC" "$OUT" \
+  || { echo "::error::patched Image 里找不到 kpimg 魔数 $MAGIC，kpimg 没被追加"; exit 1; }
+
+# ============ 8) 门禁：kptools -l 确认 patched=true ============
+echo "==> kptools -l 门禁"
+"$KPT" -l -i "$OUT" 2>&1 | tee "$IMAGE.kptools-list.log"
+grep -q 'patched=true' "$IMAGE.kptools-list.log" \
+  || { echo "::error::kptools -l 显示 patched 不为 true，注入未生效"; exit 1; }
+
+# ============ 9) 用补丁后的 Image 替换原 Image，供 AnyKernel3 打包 ============
+cp "$OUT" "$IMAGE"
+rm -f "$OUT" "$IMAGE.kptools.log" "$IMAGE.kptools-list.log"
+echo "  ✓ 已用 KP 补丁版 Image 替换原 Image（+$((AFTER-BEFORE)) B）"
+
+{
+  echo "### KernelPatch 注入（KPM 加载器）"
+  echo "| 项 | 值 |"
+  echo "|---|---|"
+  echo "| KernelPatch 版本 | \`$(cat "$KP_DIR/version" | tr -d '\n')\` |"
+  echo "| kpimg 魔数 | \`$MAGIC\` |"
+  echo "| Image 大小 | $BEFORE → $AFTER 字节（+$((AFTER-BEFORE))） |"
+  echo "| superkey | 随机生成、不打印（KPM 走 magic 分派，用不到） |"
+} >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+echo "==> KernelPatch 集成完成：KPM 加载器已注入 Image"

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # 集成 SukiSU-Nova（builtin-new 分支，CONFIG_KSU=y 内置）到荣耀 GKI 内核树。
-# 用法：integrate_sukisu.sh <KERNEL_PLATFORM> [MANAGER]
+# 用法：integrate_sukisu.sh <KERNEL_PLATFORM> [MANAGER] [ENABLE_KPM]
 #   KERNEL_PLATFORM —— 含 common/ 的内核工程根
 #   MANAGER —— 内置管理器代号（可选，默认 sukisu_nova）。
 #              当前仅支持 sukisu_nova，其他管理器「暂不支持」（预留扩展位，未来加映射项即可）。
+#   ENABLE_KPM —— true/false（可选，默认 false）。true 时 fragment 写 CONFIG_KPM=y。
+#              注意：CONFIG_KPM 会 select KALLSYMS_ALL（暴露所有内核符号，含 static），
+#              与 SUSFS 的符号/路径隐藏目标互相拆台，故默认关闭。
 #
 # 分两部分：
 #   A. 内核源码侧（软链 + Kconfig/Makefile 注入）——与 SukiSU-Nova builtin-new 官方 setup.sh 一致
@@ -18,11 +21,13 @@
 #      Kconfig 依赖/默认值被 savedefconfig 规范化后丢弃而 mismatch。
 #      defconfig_fragments 是官方 post-defconfig 语义（make defconfig 之后叠加，
 #      等效 POST_DEFCONFIG_CMDS），不触发 savedefconfig 比对，是 vendor 加配置的正道。
-# 不碰 SUSFS / KPM / ARM64_BRANCH_LINK / TAMPER_SYSCALL_TABLE（全部保持默认 n）。
+# 不碰 SUSFS / ARM64_BRANCH_LINK / TAMPER_SYSCALL_TABLE（全部保持默认 n）。
+# KPM 由 ENABLE_KPM 参数控制（默认 false，见文件头说明）。
 set -euo pipefail
 
-ROOT="${1:?用法: integrate_sukisu.sh <KERNEL_PLATFORM> [MANAGER]}"
+ROOT="${1:?用法: integrate_sukisu.sh <KERNEL_PLATFORM> [MANAGER] [ENABLE_KPM]}"
 MANAGER="${2:-sukisu_nova}"
+ENABLE_KPM="${3:-false}"
 COMMON="${ROOT}/common"
 DRI="${COMMON}/drivers"
 MAKEFILE="${DRI}/Makefile"
@@ -106,15 +111,22 @@ fi
 # ============ B. Kleaf 配置侧：fragment + BUILD.bazel 注入 ============
 
 # B1) 生成 defconfig fragment 文件（不改 gki_defconfig 本体）
+# KPM 行按 ENABLE_KPM 开关动态写（true -> CONFIG_KPM=y，false -> is not set）。
 cat > "$FRAGMENT" <<'EOF'
 # SukiSU-Nova (builtin) defconfig fragment —— 通过 define_common_kernels 的
 # defconfig_fragments 注入（post-defconfig 语义），不直接改 gki_defconfig。
-# KPM 不启用；SUSFS 由后续 integrate_susfs.sh 按 enable_susfs 开关追加。
+# SUSFS 由后续 integrate_susfs.sh 按 enable_susfs 开关追加。
 CONFIG_KSU=y
 CONFIG_KSU_FEATURE_ADBROOT=y
 # CONFIG_KSU_SUSFS is not set
-# CONFIG_KPM is not set
 EOF
+if [ "$ENABLE_KPM" = "true" ]; then
+  printf 'CONFIG_KPM=y\n' >> "$FRAGMENT"
+  echo "==> KPM 已启用（CONFIG_KPM=y；注意会 select KALLSYMS_ALL，与 SUSFS 隐藏目标互斥）"
+else
+  printf '# CONFIG_KPM is not set\n' >> "$FRAGMENT"
+  echo "==> KPM 未启用（CONFIG_KPM is not set，默认）"
+fi
 echo "==> 已生成 fragment: $FRAGMENT"
 cat "$FRAGMENT"
 

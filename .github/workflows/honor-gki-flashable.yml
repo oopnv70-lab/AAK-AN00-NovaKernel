@@ -35,6 +35,11 @@ on:
         required: false
         default: true
         type: boolean
+      enable_kpm:
+        description: '是否集成 KPM（KernelPatch 内核补丁模块加载器；需 CONFIG_KPM + KernelPatch 后处理；默认关闭）'
+        required: false
+        default: false
+        type: boolean
       strict_abi_check:
         description: '是否做严格 ABI/KMI 校验（STG 全类型图比对，含保护符号表；默认关闭；开启后只报告不阻断）'
         required: false
@@ -54,6 +59,7 @@ env:
   SYNC_LINUX_SECURITY: ${{ github.event.inputs.sync_linux_security || 'false' }}
   MANAGER: ${{ github.event.inputs.manager || 'sukisu_nova' }}
   ENABLE_SUSFS: ${{ github.event.inputs.enable_susfs || 'true' }}
+  ENABLE_KPM: ${{ github.event.inputs.enable_kpm || 'false' }}
   STRICT_ABI_CHECK: ${{ github.event.inputs.strict_abi_check || 'false' }}
   KP_DIR: ${{ github.workspace }}/kp
 
@@ -244,7 +250,7 @@ jobs:
         run: |
           set -euxo pipefail
           chmod +x scripts/integrate_sukisu.sh
-          ./scripts/integrate_sukisu.sh "${KERNEL_PLATFORM}" "${MANAGER}"
+          ./scripts/integrate_sukisu.sh "${KERNEL_PLATFORM}" "${MANAGER}" "${ENABLE_KPM}"
           # 关键验证：软链 / fragment / BUILD.bazel 注入 是否就位
           test -f "${KERNEL_PLATFORM}/common/drivers/kernelsu/Kconfig" || exit 1
           test -f "${KERNEL_PLATFORM}/common/drivers/kernelsu/Makefile" || exit 1
@@ -431,6 +437,13 @@ jobs:
             echo "==== SUSFS 符号核对结束 ===="
           fi
           ls -la "$D"
+
+      - name: 集成 KernelPatch（KPM 加载器，enable_kpm=true 时才做）
+        if: env.ENABLE_KPM == 'true'
+        run: |
+          set -uo pipefail
+          chmod +x scripts/integrate_kernelpatch.sh
+          ./scripts/integrate_kernelpatch.sh "${KERNEL_PLATFORM}" "$GITHUB_WORKSPACE/dist/Image"
 
       - name: 打包 AnyKernel3 刷机包
         run: |
