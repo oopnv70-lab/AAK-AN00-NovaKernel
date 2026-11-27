@@ -63,9 +63,13 @@ else
   echo "  ⚠ 主补丁有失败 hunk（-f 已生成 .rej 并跳过失败 hunk）"
 fi
 n_rej=$(find . -name '*.rej' -newer "$KP/50_add_susfs_in_gki-android15-6.6.patch" 2>/dev/null | wc -l | tr -d ' ')
-n_fail=$(grep -c 'FAILED' /tmp/susfs-main-apply.log 2>/dev/null || true)
+# 精确数「失败 hunk 数」：GNU patch 对每个失败 hunk 会打两行含 FAILED 的行——
+#   "Hunk #N FAILED at X."  +  "N out of M hunks FAILED"（文件级汇总行）。
+# 若用 grep -c 'FAILED' 会把汇总行也数进去，导致 FAILED 虚高（本树实测 4 实为 2）。
+# 这里只对 "N out of M hunks FAILED" 里的 N 求和 = 真实失败 hunk 数。
+n_fail=$(grep -oE '[0-9]+ out of [0-9]+ hunks FAILED' /tmp/susfs-main-apply.log 2>/dev/null | awk '{s+=$1} END{print s+0}')
 n_patch=$(grep -c 'patching file' /tmp/susfs-main-apply.log 2>/dev/null || true)
-echo "    patching_file=$n_patch FAILED=$n_fail .rej=$n_rej"
+echo "    patching_file=$n_patch failed_hunks=$n_fail .rej=$n_rej"
 if [ "$n_rej" -gt 0 ]; then
   echo "  ⚠ 主补丁产生 $n_rej 个 .rej（锚点缺失，荣耀树改动所致）。"
   echo "    不自动修复，保留 .rej，后续编译会自然失败。"
@@ -91,6 +95,29 @@ cat /tmp/susfs-main-apply.log
 #   与上游补丁等价（补丁本意就是在那一行后插入 susfs_def.h）。
 #     memory.c 锚点 = #include <linux/sched/sysctl.h>（zswap.h 应在它下一行）
 #     base.c   锚点 = #include <linux/cpufreq_times.h>（dma-buf.h 应在它下一行）
+# 校验 .rej 是否「只有 susfs_def.h include 这一个 hunk」。
+# 目的：防止 fix_rej_include 把混有真功能 hunk 的 .rej 静默删掉（假成功）。
+# 判据：.rej 每个 hunk 以 @@ 开头；新增行以 + 开头。除 susfs_def.h 的 include 块
+#   （#include / #ifdef / #if defined / #endif）外，任何其他 + 行都视为真功能代码 → 失败。
+check_rej_include_only() {
+  local rej="$1"
+  test -f "$rej" || { echo "  ⚠ $rej 不存在，无需校验"; return 0; }
+  local nhunks
+  nhunks=$(grep -c '^@@' "$rej" 2>/dev/null || echo 0)
+  if [ "$nhunks" -ne 1 ]; then
+    echo "  ✗ $rej 含 $nhunks 个 hunk（应只有 1 个 include hunk），疑似真功能 hunk 失败"
+    return 1
+  fi
+  local bad
+  bad=$(grep -E '^\+' "$rej" | grep -v '^+++' | grep -vE 'susfs_def\.h|^\+#if|^\+#endif|^\+$')
+  if [ -n "$bad" ]; then
+    echo "  ✗ $rej 含真功能代码（非 include），拒绝静默丢弃："
+    printf '%s\n' "$bad" | head -5
+    return 1
+  fi
+  return 0
+}
+
 fix_rej_include() {
   local file="$1" anchor="$2" guard="$3"
   local abs="$COMMON/$file"
@@ -118,8 +145,16 @@ fix_rej_include() {
   # 校验插入结果
   grep -q 'susfs_def.h' "$abs" || { echo "  ✗ $file 插入后仍无 susfs_def.h"; return 1; }
   echo "  ✓ $file 已补齐 susfs_def.h include（guard: $guard）"
-  # 清理对应的 .rej
-  rm -f "$abs.rej"
+  # 清理对应的 .rej —— 但必须先校验 .rej 里只有 include 这一个 hunk。
+  # 若 .rej 还混着真功能 hunk（如 __access_remote_vm / do_proc_readlink 的 hook），
+  # 直接 rm 会把真功能静默丢弃 = 「假成功」。这里强制校验，任何真代码 hunk 都 exit 1。
+  if check_rej_include_only "$abs.rej"; then
+    rm -f "$abs.rej"
+    echo "  ✓ $file 的 .rej 确认只含 include hunk，已安全清理"
+  else
+    echo "::error:: $file 的 .rej 含真功能 hunk，拒绝静默丢弃"
+    return 1
+  fi
 }
 
 echo "==> 补齐已知 .rej 的 susfs_def.h include"
